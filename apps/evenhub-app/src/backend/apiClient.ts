@@ -127,14 +127,15 @@ export async function createTranslationSession(
     throw new TranslationApiError('invalid_response', 'Response missing model', response.status)
   }
 
-  // expiresAt is documented as required (§13.1) but the backend currently omits
-  // it when OpenAI doesn't return one. Treat missing/non-string as invalid here
-  // so callers always get a usable timestamp.
-  const expiresAt = typeof candidate.expiresAt === 'string' ? candidate.expiresAt : ''
+  // expiresAt is optional in the wire protocol — OpenAI's preview client_secrets
+  // endpoint may omit `expires_at`. Forward as `undefined` when missing so
+  // callers can distinguish "unknown expiry" from "empty string" and decide
+  // their own policy (e.g. short-lived treatment regardless).
+  const expiresAt = typeof candidate.expiresAt === 'string' ? candidate.expiresAt : undefined
 
   return {
     clientSecret: candidate.clientSecret,
-    expiresAt,
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
     model: candidate.model,
   }
 }

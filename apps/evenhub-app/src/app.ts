@@ -61,7 +61,7 @@ type SessionCreator = (req: {
     userId: string
     client: { appVersion: string; device: string }
   }
-}) => Promise<{ clientSecret: string; expiresAt: string; model: string }>
+}) => Promise<{ clientSecret: string; expiresAt?: string; model: string }>
 
 type RtcClientFactory = (opts: {
   clientSecret: string
@@ -316,7 +316,7 @@ export class App {
         return
       }
 
-      let session: { clientSecret: string; expiresAt: string; model: string }
+      let session: { clientSecret: string; expiresAt?: string; model: string }
       try {
         session = await this.deps.createSession({
           backendUrl: this.cfg.backendUrl,

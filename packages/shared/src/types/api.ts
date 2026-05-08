@@ -15,8 +15,13 @@ export interface TranslationSessionRequest {
 /** POST /api/openai/realtime/translation/session — success response. */
 export interface TranslationSessionResponse {
   clientSecret: string
-  /** ISO-8601 expiry timestamp for the short-lived OpenAI client secret. */
-  expiresAt: string
+  /**
+   * ISO-8601 expiry timestamp for the short-lived OpenAI client secret. Optional
+   * because the upstream `client_secrets` endpoint does not always return one
+   * (preview builds may omit `expires_at`); when absent, callers should treat
+   * the secret as best-effort short-lived and not rely on the timestamp.
+   */
+  expiresAt?: string
   model: string
 }
 

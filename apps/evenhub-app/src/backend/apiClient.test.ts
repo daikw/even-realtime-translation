@@ -149,4 +149,54 @@ describe('createTranslationSession', () => {
     expect(e.status).toBe(418)
     expect(e.name).toBe('TranslationApiError')
   })
+
+  it('passes through expiresAt when the backend returns one', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        clientSecret: 'cs',
+        expiresAt: '2026-05-08T12:34:56Z',
+        model: 'gpt-realtime-translate',
+      }),
+    )
+    const result = await createTranslationSession({
+      backendUrl: 'http://localhost:3000',
+      request: validRequest,
+      fetchImpl,
+    })
+    expect(result.expiresAt).toBe('2026-05-08T12:34:56Z')
+  })
+
+  it('omits expiresAt (undefined) when the backend does not return one', async () => {
+    // The backend may legitimately omit expiresAt when OpenAI's upstream
+    // client_secrets response lacks `expires_at`. Forward as undefined so
+    // callers can distinguish "unknown" from "empty string".
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        clientSecret: 'cs',
+        model: 'gpt-realtime-translate',
+      }),
+    )
+    const result = await createTranslationSession({
+      backendUrl: 'http://localhost:3000',
+      request: validRequest,
+      fetchImpl,
+    })
+    expect(result.expiresAt).toBeUndefined()
+  })
+
+  it('omits expiresAt (undefined) when the backend returns a non-string value', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        clientSecret: 'cs',
+        expiresAt: 12345 as unknown as string,
+        model: 'gpt-realtime-translate',
+      }),
+    )
+    const result = await createTranslationSession({
+      backendUrl: 'http://localhost:3000',
+      request: validRequest,
+      fetchImpl,
+    })
+    expect(result.expiresAt).toBeUndefined()
+  })
 })
