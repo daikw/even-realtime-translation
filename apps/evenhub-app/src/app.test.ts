@@ -586,6 +586,135 @@ describe('App — error paths', () => {
     await app.dispose()
   })
 
+  it('disconnected from live triggers a reconnect attempt that drives back to live', async () => {
+    // F3: ReconnectController is wired. After the first attempt's controller
+    // delay (0ms), App calls startSession again, which creates a fresh client
+    // whose onStateChange('connected') flips status back to live.
+    let createCount = 0
+    const sessions: { calls: RtcCalls; client: WebRtcTranslationClient }[] = []
+    const createRtcClient: AppDeps['createRtcClient'] = (opts) => {
+      const next = makeRtcClient()
+      next.calls.callbacks.onStateChange = opts.onStateChange
+      next.calls.callbacks.onError = opts.onError
+      sessions.push(next)
+      createCount += 1
+      return next.client
+    }
+    const app = new App(defaultCfg(), {
+      bridgeFactory: () => Promise.reject(new EvenBridgeInitError('timeout', 'no host')),
+      mockBridgeFactory: () => createMockBridge(),
+      acquireMic: () => Promise.resolve(makeMicStream()),
+      createSession: vi.fn().mockResolvedValue({
+        clientSecret: 's',
+        expiresAt: 'e',
+        model: 'm',
+      }),
+      createRtcClient,
+      attachAudio: vi.fn(),
+      detachAudio: vi.fn(),
+      setIntervalImpl: () => 0,
+      clearIntervalImpl: () => {
+        // noop
+      },
+      now: () => 1000,
+      log: () => {
+        // noop
+      },
+    })
+    await app.boot()
+    app.dispatch({ type: 'START_REQUESTED' })
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    sessions[0]?.calls.callbacks.onStateChange?.('connected')
+    expect(app.store.getState().status).toBe('live')
+
+    // Drop the connection.
+    sessions[0]?.calls.callbacks.onStateChange?.('disconnected')
+    expect(app.store.getState().status).toBe('reconnecting')
+
+    // Attempt 1 fires immediately (delay 0). Drain microtasks for the new
+    // session's mic+session+start to settle, then connect the new client.
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(createCount).toBeGreaterThanOrEqual(2)
+
+    sessions[1]?.calls.callbacks.onStateChange?.('connected')
+    expect(app.store.getState().status).toBe('live')
+
+    await app.dispose()
+  })
+
+  it('reconnect: max attempts reached → ERROR with code reconnect_failed', async () => {
+    // F3: after a successful CONNECT and a subsequent disconnect, App enters
+    // reconnecting and schedules retries via ReconnectController. When all
+    // retries fail (every new start() rejects), the controller exhausts its
+    // budget and the App surfaces a dedicated terminal error so the HUD can
+    // tell the user reconnect specifically gave up (vs. the original failure).
+    let attempts = 0
+    const sessions: { calls: RtcCalls; client: WebRtcTranslationClient; failNext: boolean }[] = []
+    const createRtcClient: AppDeps['createRtcClient'] = (opts) => {
+      const next = makeRtcClient()
+      next.calls.callbacks.onStateChange = opts.onStateChange
+      next.calls.callbacks.onError = opts.onError
+      const failNext = attempts > 0
+      // After the first session connects, every retry should reject.
+      if (failNext) {
+        next.calls.start.mockReset().mockRejectedValue(new Error('retry sdp failed'))
+      }
+      sessions.push({ ...next, failNext })
+      attempts += 1
+      return next.client
+    }
+    const app = new App(defaultCfg(), {
+      bridgeFactory: () => Promise.reject(new EvenBridgeInitError('timeout', 'no host')),
+      mockBridgeFactory: () => createMockBridge(),
+      acquireMic: () => Promise.resolve(makeMicStream()),
+      createSession: vi.fn().mockResolvedValue({
+        clientSecret: 's',
+        expiresAt: 'e',
+        model: 'm',
+      }),
+      createRtcClient,
+      attachAudio: vi.fn(),
+      detachAudio: vi.fn(),
+      setIntervalImpl: () => 0,
+      clearIntervalImpl: () => {
+        // noop
+      },
+      now: () => 0,
+      log: () => {
+        // noop
+      },
+      reconnectMaxAttempts: 2,
+      reconnectBaseDelayMs: 0,
+    })
+    await app.boot()
+    app.dispatch({ type: 'START_REQUESTED' })
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    // Connect the first session.
+    sessions[0]?.calls.callbacks.onStateChange?.('connected')
+    expect(app.store.getState().status).toBe('live')
+
+    // Now drop. Controller schedules retries with delay 0 (test wiring).
+    sessions[0]?.calls.callbacks.onStateChange?.('disconnected')
+    expect(app.store.getState().status).toBe('reconnecting')
+
+    // Drain enough microtasks for both retries to spin up and reject.
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    const state = app.store.getState()
+    expect(state.status).toBe('error')
+    expect(state.error?.code).toBe('reconnect_failed')
+
+    await app.dispose()
+  })
+
   it('TICK from interval updates elapsedSeconds while live', async () => {
     const { client, calls } = makeRtcClient()
     const intervalSlot: { fn: (() => void) | null } = { fn: null }

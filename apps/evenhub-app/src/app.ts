@@ -12,7 +12,11 @@ import {
   renderForStatus,
   type HudViewModel,
 } from './hud/index.js'
-import { createWebRtcTranslationClient, type WebRtcTranslationClient } from './realtime/index.js'
+import {
+  ReconnectController,
+  createWebRtcTranslationClient,
+  type WebRtcTranslationClient,
+} from './realtime/index.js'
 import {
   TranslationApiError,
   createTranslationSession,
@@ -88,6 +92,9 @@ export interface AppDeps {
   /** Test seam — defaults to `Date.now`. */
   now?: () => number
   log?: (...args: unknown[]) => void
+  /** ReconnectController policy. Defaults: 3 attempts, 500ms base delay. */
+  reconnectMaxAttempts?: number
+  reconnectBaseDelayMs?: number
 }
 
 interface ActiveSession {
@@ -110,6 +117,13 @@ export class App {
   private lifecycleUnsubscribe: (() => void) | null = null
   private startInFlight = false
   private disposed = false
+  // Reconnect: per-App lifetime. Created in constructor, reset on every
+  // successful CONNECTED, disposed in App.dispose.
+  private readonly reconnectController: ReconnectController
+  // True while we are in a controller-driven retry attempt; lets startSession
+  // throw rather than dispatch ERROR so the controller can schedule the next
+  // attempt or surface `reconnect_failed`.
+  private inRetryLoop = false
 
   constructor(cfg: AppConfig, deps: AppDeps = {}) {
     this.cfg = cfg
@@ -147,7 +161,14 @@ export class App {
             console.log('[evenhub-app]', ...args)
           }
         }),
+      reconnectMaxAttempts: deps.reconnectMaxAttempts ?? 3,
+      reconnectBaseDelayMs: deps.reconnectBaseDelayMs ?? 500,
     }
+
+    this.reconnectController = new ReconnectController({
+      maxAttempts: this.deps.reconnectMaxAttempts,
+      baseDelayMs: this.deps.reconnectBaseDelayMs,
+    })
   }
 
   /**
@@ -206,6 +227,10 @@ export class App {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+
+    // Stop any pending reconnect timer first so an in-flight attempt cannot
+    // race with the rest of teardown.
+    this.reconnectController.dispose()
 
     if (this.tickHandle !== null) {
       this.deps.clearIntervalImpl(this.tickHandle)
@@ -274,6 +299,8 @@ export class App {
       return
     }
     if (state.status === 'exiting') {
+      // Cancel any pending reconnect timer so we don't race with teardown.
+      this.reconnectController.reset()
       await this.shutdownSession()
       this.store.dispatch({ type: 'EXITED' })
     }
@@ -293,6 +320,9 @@ export class App {
           this.store.dispatch({ type: 'PERMISSION_DENIED', reason: 'mic' })
           return
         }
+        if (this.inRetryLoop) {
+          throw err instanceof Error ? err : new Error('mic acquisition failed')
+        }
         this.store.dispatch({
           type: 'ERROR',
           code: 'mic_error',
@@ -307,6 +337,10 @@ export class App {
       if (target === 'auto') {
         // Defensive guard: the rotation never lands on `auto`, but TypeScript
         // doesn't know that here.
+        if (this.inRetryLoop) {
+          stopMediaStream(mic)
+          throw new Error('auto cannot be the target language')
+        }
         this.store.dispatch({
           type: 'ERROR',
           code: 'invalid_target',
@@ -328,6 +362,10 @@ export class App {
           },
         })
       } catch (err) {
+        if (this.inRetryLoop) {
+          stopMediaStream(mic)
+          throw err instanceof Error ? err : new Error('backend unavailable')
+        }
         const code = err instanceof TranslationApiError ? err.code : 'backend_error'
         const message = err instanceof Error ? err.message : 'backend unavailable'
         this.store.dispatch({ type: 'ERROR', code, message })
@@ -347,11 +385,20 @@ export class App {
         onStateChange: (rtcState) => {
           if (rtcState === 'connected') {
             this.store.dispatch({ type: 'CONNECTED', startedAt: this.deps.now() })
+            // Successful (re)connect — clear retry budget so a future drop
+            // gets a full exponential-backoff window again.
+            this.reconnectController.reset()
           } else if (rtcState === 'failed' || rtcState === 'disconnected') {
             this.store.dispatch({
               type: 'CONNECTION_STATE_CHANGED',
               state: rtcState === 'failed' ? 'failed' : 'disconnected',
             })
+            // Only kick off reconnect once we've actually been live; the
+            // reducer transitions to `reconnecting` only from live/paused, so
+            // use the post-dispatch status as the gate.
+            if (this.store.getState().status === 'reconnecting') {
+              void this.scheduleReconnect()
+            }
           }
         },
         onError: (err) => {
@@ -373,15 +420,65 @@ export class App {
         await client.start()
       } catch (err) {
         this.deps.log('client.start failed', err)
+        await this.shutdownSession()
+        if (this.inRetryLoop) {
+          // Let the controller surface the failure and decide whether to
+          // schedule another attempt.
+          throw err instanceof Error ? err : new Error('rtc start failed')
+        }
         // Single source of truth for ERROR transitions out of start failures.
         // The reducer's ERROR idempotency makes it safe even if the underlying
         // orchestrator also reports the same error to the observer.
         const message = err instanceof Error ? err.message : 'rtc start failed'
         this.store.dispatch({ type: 'ERROR', code: 'rtc_error', message })
-        await this.shutdownSession()
       }
     } finally {
       this.startInFlight = false
+    }
+  }
+
+  /**
+   * Drive a controller-managed reconnect attempt. Each attempt runs
+   * `startSession()` in retry mode (failures throw rather than dispatch ERROR).
+   * If the controller exhausts its budget, we surface a dedicated
+   * `reconnect_failed` error so the HUD can distinguish loss-of-connection
+   * exhaustion from the original drop.
+   */
+  private async scheduleReconnect(): Promise<void> {
+    if (this.disposed) return
+    try {
+      await this.reconnectController.scheduleNext(async () => {
+        if (this.disposed) return
+        if (this.store.getState().status !== 'reconnecting') return
+        this.inRetryLoop = true
+        try {
+          await this.startSession()
+        } finally {
+          this.inRetryLoop = false
+        }
+      })
+      // attempt resolved successfully; if onStateChange('connected') ran, the
+      // reducer is already back in `live` and `reset()` cleared attempts.
+    } catch (err) {
+      if (this.disposed) return
+      // Two failure modes:
+      //   1. action threw (start/mic/backend rejected) → another retry is
+      //      worth scheduling until the controller exhausts itself.
+      //   2. controller already at maxAttempts → surface terminal error.
+      const message = err instanceof Error ? err.message : 'reconnect failed'
+      const exhausted = /max attempts/i.test(message)
+      if (exhausted) {
+        this.store.dispatch({
+          type: 'ERROR',
+          code: 'reconnect_failed',
+          message: 'reconnect attempts exhausted',
+        })
+        return
+      }
+      // Still in budget → keep retrying.
+      if (this.store.getState().status === 'reconnecting') {
+        void this.scheduleReconnect()
+      }
     }
   }
 
