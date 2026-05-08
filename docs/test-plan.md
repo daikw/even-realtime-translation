@@ -145,7 +145,79 @@ Claude は CLI を install しない（`~/.claude/rules/supply-chain-security.md
 | QR sideload | Even Hub CLI からのアプリ配布 |
 | `private build`（`.ehpk` packaging） | `evenhub pack` でビルド、Developer Portal アップロード（§22） |
 
-### 3.4 翻訳品質テスト（要ユーザー実施 / 設計書 §16.5）
+### 3.4 API contract smoke（要ユーザー実施 / OpenAI Realtime Translation preview）
+
+設計書 §6.3 / §14.1 / §21 が参照している OpenAI Realtime Translation の
+preview API 仕様（event 名・endpoint path・session.update payload）は
+現時点で実 API 検証が未了。実機 / Simulator で 1 セッションを通したときに
+以下を必ずキャプチャして、`apps/evenhub-app/src/realtime/eventParser.ts` /
+`sdp.ts` / `language.ts` の TODO コメントと突き合わせる。
+
+実施前提:
+
+- backend と evenhub-app をローカル起動済み
+- `.env` の `OPENAI_API_KEY` が `gpt-realtime-translate` 利用可能
+- DevTools (Network + Console) を開いておく
+
+#### A. `/api/openai/realtime/translation/session` の upstream 経路
+
+1. backend logs で `Bearer` ヘッダが OpenAI に飛んでいることを確認
+2. backend が叩く upstream URL が `/v1/realtime/translations/client_secrets` であることを確認（`services/translation-backend/src/openai.ts` の `OPENAI_CLIENT_SECRETS_URL`）
+3. レスポンスに `value` / `secret` のどちらが入っているか記録（OpenAI 側の preview build で揺れる）
+4. `expires_at` が含まれるか / Unix epoch 秒であるか記録（含まれない場合は shared の `expiresAt?: string` で OK）
+
+| 観点 | 期待 | 実測 |
+| --- | --- | --- |
+| upstream URL | `https://api.openai.com/v1/realtime/translations/client_secrets` | |
+| response body のキー | `value` または `secret` | |
+| `expires_at` の型 | `number` (epoch 秒) または欠落 | |
+
+#### B. WebRTC SDP 交換 (`/v1/realtime/translations/calls`)
+
+1. WebView から `exchangeSdp` が叩く URL を Network タブで確認
+2. リクエスト method / Content-Type / Authorization 形式
+3. レスポンス Content-Type と body が SDP 形式であること
+
+| 観点 | 期待 | 実測 |
+| --- | --- | --- |
+| 完全 URL | `https://api.openai.com/v1/realtime/translations/calls?model=gpt-realtime-translate` | |
+| status | 200 | |
+| response Content-Type | `application/sdp` または `text/plain` | |
+| `Bearer <clientSecret>` で通る | yes | |
+
+#### C. data channel `oai-events` の event 名
+
+DevTools Console に `[realtime] unknown server event type:` が現れたら、その
+type 名を必ず記録。設計書の event 名と差分があれば `eventParser.ts` の
+switch を更新する。
+
+| 期待される type | 実測された type | コメント |
+| --- | --- | --- |
+| `session.created` | | sessionId 取得 |
+| `session.updated` | | session.update 後 |
+| `session.input_transcript.delta` | | speech 認識結果 |
+| `session.output_transcript.delta` | | 翻訳字幕 |
+| `error` | | code/message |
+
+#### D. `session.update` で言語切替
+
+1. 接続後に G2 swipe で言語ローテーションする
+2. data channel に流れる JSON を Console / Network から確認
+3. `{ type: 'session.update', session: { audio: { output: { language: 'ja' } } } }` 形式が通るか
+
+| 観点 | 期待 | 実測 |
+| --- | --- | --- |
+| payload の nest | `session.audio.output.language` | |
+| 切替後 first delta の遅延 | 1〜2 秒 | |
+
+#### E. 記録方法
+
+- 実測は `docs/realtime-translation-eveng2-mvp-design.md` ではなく、本セクションの
+  table を埋める形で commit する（PR 内で「測定結果」として）。
+- preview API が切り替わっていた場合は同じ PR 内で `eventParser.ts` /
+  `sdp.ts` / `language.ts` の対応 TODO を解決する。
+
+### 3.5 翻訳品質テスト（要ユーザー実施 / 設計書 §16.5）
 
 実 OpenAI Realtime Translation API に対して、設計書のサンプル発話を流し、字幕の正確性と遅延を計測する。
 
