@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   isInputTranscriptDelta,
@@ -6,6 +6,7 @@ import {
   isServerError,
   isSessionCreated,
   isSessionUpdated,
+  logUnknownRealtimeEvent,
   parseRealtimeEvent,
 } from './eventParser.js'
 
@@ -155,5 +156,36 @@ describe('type guards', () => {
     expect(isInputTranscriptDelta(ev)).toBe(false)
     expect(isOutputTranscriptDelta(ev)).toBe(false)
     expect(isServerError(ev)).toBe(false)
+  })
+})
+
+describe('logUnknownRealtimeEvent (dev-only)', () => {
+  it('emits console.debug when DEV is true', () => {
+    const spy = vi.spyOn(console, 'debug').mockImplementation(() => {
+      // noop
+    })
+    logUnknownRealtimeEvent('something.new', { DEV: true })
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0]?.[0]).toContain('unknown server event type')
+    expect(spy.mock.calls[0]?.[1]).toBe('something.new')
+    spy.mockRestore()
+  })
+
+  it('is silent when DEV is false', () => {
+    const spy = vi.spyOn(console, 'debug').mockImplementation(() => {
+      // noop
+    })
+    logUnknownRealtimeEvent('something.new', { DEV: false })
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('is silent when DEV is undefined (production default)', () => {
+    const spy = vi.spyOn(console, 'debug').mockImplementation(() => {
+      // noop
+    })
+    logUnknownRealtimeEvent('something.new', {})
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
   })
 })

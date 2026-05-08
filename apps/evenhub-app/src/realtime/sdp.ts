@@ -7,6 +7,15 @@
  * `text/plain`. We deliberately keep this module fetch-only so it stays
  * trivially testable and reusable across the WebRTC client and any future
  * renegotiation flow.
+ *
+ * TODO (API contract verification):
+ * The path `/v1/realtime/translations/calls` and the `?model=` query
+ * parameter follow the OpenAI Realtime *Translation* preview spec from the
+ * design doc. They have NOT yet been confirmed against a live session. When
+ * running the manual smoke checklist in `docs/test-plan.md` ("API contract
+ * smoke"), capture the actual request URL, response status, and any
+ * differences between request/response bodies; update DEFAULT_BASE_URL +
+ * the path here if upstream has renamed the endpoint.
  */
 
 const DEFAULT_BASE_URL = 'https://api.openai.com'
