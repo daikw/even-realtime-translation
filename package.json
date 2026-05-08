@@ -1,0 +1,23 @@
+{
+  "name": "even-realtime-translation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Even G2 realtime translation HUD PoC monorepo",
+  "license": "MIT",
+  "author": "Daiki Watanabe",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "pnpm -r test",
+    "test:coverage": "pnpm -r test:coverage",
+    "build": "pnpm -r build",
+    "dev:backend": "pnpm --filter @even-rt/backend dev",
+    "dev:app": "pnpm --filter @even-rt/evenhub-app dev"
+  }
+}
