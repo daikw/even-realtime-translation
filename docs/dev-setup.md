@@ -39,6 +39,7 @@ cp .env.example .env
 | `OPENAI_API_KEY` | backend のみで使用。WebView へは渡さない（§10.1） |
 | `SAFETY_ID_SALT` | `OpenAI-Safety-Identifier` 生成用の salt。固定値の例: `openssl rand -base64 32` |
 | `BACKEND_PORT` | backend listen port。省略時 `3000` |
+| `BACKEND_HOST` | listen インターフェース。省略時 `127.0.0.1`（loopback only）。**LAN/コンテナ公開時のみ** `0.0.0.0` に変更すること。dev backend は無認証なので、LAN 公開する前に上流に auth を入れる |
 | `ALLOWED_ORIGINS` | カンマ区切りの CORS allowlist。省略時 `http://localhost:5173` |
 | `PUBLIC_BACKEND_URL` | WebView から backend に到達する URL。省略時 `http://localhost:3000` |
 | `PUBLIC_OPENAI_BASE_URL` | OpenAI Realtime API の base URL。省略時 `https://api.openai.com` |

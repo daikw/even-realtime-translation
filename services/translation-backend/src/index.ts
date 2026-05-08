@@ -6,7 +6,7 @@ const config = loadConfig()
 const app = buildServer({ config })
 
 app
-  .listen({ port: config.port, host: '0.0.0.0' })
+  .listen({ port: config.port, host: config.host })
   .then((addr) => {
     app.log.info(`backend listening on ${addr}`)
   })

@@ -7,12 +7,20 @@
  */
 export interface Config {
   port: number
+  /**
+   * Listen interface for the HTTP server. Defaults to `127.0.0.1` so that an
+   * un-authenticated dev backend isn't accidentally reachable from the LAN
+   * (Sec review M-4). Override with `BACKEND_HOST=0.0.0.0` only when you
+   * intentionally want to expose the service (containers, sidecars).
+   */
+  host: string
   openaiApiKey: string
   safetyIdSalt: string
   allowedOrigins: string[]
 }
 
 const DEFAULT_PORT = 3000
+const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_ALLOWED_ORIGIN = 'http://localhost:5173'
 
 function readRequiredString(env: NodeJS.ProcessEnv, key: string): string {
@@ -34,6 +42,12 @@ function readPort(env: NodeJS.ProcessEnv): number {
   return parsed
 }
 
+function readHost(env: NodeJS.ProcessEnv): string {
+  const raw = env.BACKEND_HOST
+  if (raw === undefined || raw === '') return DEFAULT_HOST
+  return raw
+}
+
 function readAllowedOrigins(env: NodeJS.ProcessEnv): string[] {
   const raw = env.ALLOWED_ORIGINS
   if (raw === undefined || raw === '') return [DEFAULT_ALLOWED_ORIGIN]
@@ -48,6 +62,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     openaiApiKey: readRequiredString(env, 'OPENAI_API_KEY'),
     safetyIdSalt: readRequiredString(env, 'SAFETY_ID_SALT'),
     port: readPort(env),
+    host: readHost(env),
     allowedOrigins: readAllowedOrigins(env),
   }
 }

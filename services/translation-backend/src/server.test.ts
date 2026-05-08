@@ -6,6 +6,7 @@ const baseOptions: BuildServerOptions = {
   logger: false,
   config: {
     port: 3000,
+    host: '127.0.0.1',
     openaiApiKey: 'sk-test',
     safetyIdSalt: 'app-salt',
     allowedOrigins: ['http://localhost:5173'],

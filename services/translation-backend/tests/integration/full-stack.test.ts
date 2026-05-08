@@ -24,6 +24,7 @@ import { buildServer, type BuildServerOptions } from '../../src/server.js'
 
 const baseConfig: NonNullable<BuildServerOptions['config']> = {
   port: 0,
+  host: '127.0.0.1',
   openaiApiKey: 'sk-test',
   safetyIdSalt: 'integration-salt',
   allowedOrigins: ['http://localhost:5173'],

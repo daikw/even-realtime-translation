@@ -60,4 +60,21 @@ describe('loadConfig', () => {
     })
     expect(cfg.allowedOrigins).toEqual(['http://localhost:5173'])
   })
+
+  describe('BACKEND_HOST (F6 / Sec M-4)', () => {
+    it('defaults to 127.0.0.1 to avoid LAN exposure', () => {
+      const cfg = loadConfig({ ...baseEnv })
+      expect(cfg.host).toBe('127.0.0.1')
+    })
+
+    it('honours BACKEND_HOST when explicitly set (e.g. 0.0.0.0 for containers)', () => {
+      const cfg = loadConfig({ ...baseEnv, BACKEND_HOST: '0.0.0.0' })
+      expect(cfg.host).toBe('0.0.0.0')
+    })
+
+    it('treats empty BACKEND_HOST as unset (uses default)', () => {
+      const cfg = loadConfig({ ...baseEnv, BACKEND_HOST: '' })
+      expect(cfg.host).toBe('127.0.0.1')
+    })
+  })
 })
