@@ -5,7 +5,10 @@ export default defineConfig({
     name: 'evenhub-app',
     // jsdom because we mock browser APIs (Even bridge, WebRTC) in unit tests.
     environment: 'jsdom',
-    include: ['src/**/*.test.ts'],
+    // `tests/` holds cross-layer integration suites (state+hud, App lifecycle).
+    // Keeping them out of `src/` avoids polluting per-module unit globs while
+    // still running under the same vitest project.
+    include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       include: [

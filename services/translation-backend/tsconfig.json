@@ -6,11 +6,12 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2022"],
     "types": ["node"],
-    "outDir": "dist",
-    "rootDir": "src",
-    "sourceMap": true,
-    "declaration": false,
-    "composite": false
+    "noEmit": true,
+    "sourceMap": false
   },
-  "include": ["src/**/*"]
+  // Default config is editor / typecheck / lint friendly: it sees both
+  // production source and integration tests so typescript-eslint can resolve
+  // every file. Build emit is delegated to `tsconfig.build.json` to keep
+  // `dist/` clean of test artifacts.
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts"]
 }

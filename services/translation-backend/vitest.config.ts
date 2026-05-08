@@ -4,7 +4,10 @@ export default defineConfig({
   test: {
     name: 'translation-backend',
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // `tests/integration/*.test.ts` boots a real Fastify instance and drives
+    // the WebView `apiClient` over HTTP. Kept out of `src/` so package unit
+    // globs and coverage rules aren't disturbed.
+    include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
