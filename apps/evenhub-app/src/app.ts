@@ -181,7 +181,12 @@ export class App {
 
     this.bridge = await this.acquireBridge()
 
-    this.display = new HudDisplay(this.bridge)
+    // SubtitleBuffer (below) already throttles at 150ms before we ever call
+    // upgradeText, so configuring HudDisplay with another 150ms window would
+    // compound to ~300ms worst-case latency (Codex M-3 / F7). Set intervalMs=0
+    // to make the SDK call a passthrough; throttle responsibility lives in
+    // exactly one place.
+    this.display = new HudDisplay(this.bridge, { intervalMs: 0 })
     await this.display.setupPage({ containerId: 1 })
 
     this.subtitleBuffer = new SubtitleBuffer({

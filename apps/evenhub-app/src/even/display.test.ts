@@ -186,4 +186,31 @@ describe('HudDisplay.upgradeText (throttled)', () => {
 
     await expect(display.upgradeText('x')).rejects.toThrow(/setupPage/i)
   })
+
+  it('intervalMs=0 acts as a passthrough: each upgradeText fires the SDK call', async () => {
+    // F7: when SubtitleBuffer above us is already throttling, App constructs
+    // HudDisplay with intervalMs=0 so we don't compound a 2nd trailing-edge
+    // window. With intervalMs=0 the timer expires on the next macro-task,
+    // freeing the next upgradeText to leading-edge fire immediately.
+    const bridge = makeBridge()
+    const display = new HudDisplay(asBridge(bridge), { intervalMs: 0 })
+    await display.setupPage({ containerId: MAIN_TEXT_CONTAINER_ID })
+
+    void display.upgradeText('a')
+    await Promise.resolve()
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1)
+    expect(
+      (bridge.textContainerUpgrade.mock.calls[0]?.[0] as TextContainerUpgrade).content,
+    ).toBe('a')
+
+    // Advance timers past the 0ms cool-down so the throttle slot is free.
+    await vi.advanceTimersByTimeAsync(1)
+
+    void display.upgradeText('b')
+    await Promise.resolve()
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(2)
+    expect(
+      (bridge.textContainerUpgrade.mock.calls[1]?.[0] as TextContainerUpgrade).content,
+    ).toBe('b')
+  })
 })
