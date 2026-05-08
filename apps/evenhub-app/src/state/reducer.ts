@@ -105,6 +105,20 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
 
     case 'ERROR': {
+      // Idempotent on identical payload: if we are already in `error` with the
+      // same code+message, return the same reference. This lets multiple
+      // observers (RTC client.onError observer + App-side catch on
+      // client.start() rejection) report the same failure without churning
+      // subscribers or overwriting equivalent error info. A *different*
+      // payload still wins so a subsequent, distinct failure surfaces.
+      if (
+        state.status === 'error' &&
+        state.error !== null &&
+        state.error.code === action.code &&
+        state.error.message === action.message
+      ) {
+        return state
+      }
       return {
         ...state,
         status: 'error',

@@ -352,6 +352,50 @@ describe('appReducer — error handling', () => {
     expect(next.error).toBeNull()
     expect(next.status).toBe('error')
   })
+
+  it('ERROR is idempotent: a second ERROR with the same code/message returns the same reference', () => {
+    // Defends against double-dispatch when both client.onError and the
+    // App-side catch report the same RTC start failure (F2 invariant).
+    const start: AppState = {
+      ...INITIAL_STATE,
+      status: 'error',
+      error: { code: 'rtc_error', message: 'sdp failed' },
+    }
+    const next = appReducer(start, {
+      type: 'ERROR',
+      code: 'rtc_error',
+      message: 'sdp failed',
+    })
+    expect(next).toBe(start)
+  })
+
+  it('ERROR while already in error preserves the FIRST error info on identical payload', () => {
+    const first: AppState = {
+      ...INITIAL_STATE,
+      status: 'error',
+      error: { code: 'rtc_error', message: 'first' },
+    }
+    const next = appReducer(first, {
+      type: 'ERROR',
+      code: 'rtc_error',
+      message: 'first',
+    })
+    expect(next.error).toEqual(first.error)
+  })
+
+  it('ERROR with a different payload still overwrites (operator can introduce a new failure)', () => {
+    const start: AppState = {
+      ...INITIAL_STATE,
+      status: 'error',
+      error: { code: 'rtc_error', message: 'first' },
+    }
+    const next = appReducer(start, {
+      type: 'ERROR',
+      code: 'backend_error',
+      message: 'second',
+    })
+    expect(next.error).toEqual({ code: 'backend_error', message: 'second' })
+  })
 })
 
 describe('appReducer — unknown / no-op safety', () => {

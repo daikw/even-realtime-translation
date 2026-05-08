@@ -355,12 +355,13 @@ export class App {
           }
         },
         onError: (err) => {
-          this.deps.log('RTC error', err.name)
-          this.store.dispatch({
-            type: 'ERROR',
-            code: 'rtc_error',
-            message: err.message,
-          })
+          // Observability-only hook. The single source of truth for transitioning
+          // into `status: 'error'` is the App-side catch around `client.start()`
+          // (and the dedicated mic / backend / target-language guards above).
+          // Reducer ERROR idempotency means even if a legacy build still
+          // reports here, the duplicate dispatch is a no-op — but we don't
+          // dispatch from this hook to keep the contract single-pathed.
+          this.deps.log('RTC error (observed)', err.name, err.message)
         },
         baseUrl: this.cfg.openaiBaseUrl,
         model: this.cfg.modelName,
@@ -372,9 +373,11 @@ export class App {
         await client.start()
       } catch (err) {
         this.deps.log('client.start failed', err)
-        // onError already dispatched ERROR via the client's reporter; ensure
-        // the session reference is dropped so subsequent retries get a fresh
-        // client.
+        // Single source of truth for ERROR transitions out of start failures.
+        // The reducer's ERROR idempotency makes it safe even if the underlying
+        // orchestrator also reports the same error to the observer.
+        const message = err instanceof Error ? err.message : 'rtc start failed'
+        this.store.dispatch({ type: 'ERROR', code: 'rtc_error', message })
         await this.shutdownSession()
       }
     } finally {

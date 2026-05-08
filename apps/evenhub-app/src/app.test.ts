@@ -442,7 +442,13 @@ describe('App — error paths', () => {
     await app.dispose()
   })
 
-  it('client.start() rejection routes through ERROR via onError', async () => {
+  it('client.start() rejection: App-side catch dispatches ERROR + shutdown', async () => {
+    // Single-source-of-truth contract (F2): when client.start() throws, the App
+    // catch is responsible for dispatching ERROR and tearing down. The
+    // onError observer is allowed to fire (the underlying client may report
+    // the same failure to it) but must not dispatch — the reducer's ERROR
+    // idempotency guards against subscriber churn even if it does in legacy
+    // builds.
     const startMock = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('sdp failed'))
     const stopMock = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
     const sendSessionUpdateMock = vi.fn<(lang: string) => void>()
@@ -462,7 +468,9 @@ describe('App — error paths', () => {
     }
     const createRtcClient: AppDeps['createRtcClient'] = (opts) => {
       calls.callbacks.onError = opts.onError
-      // Simulate: the orchestrator reports the error before throwing.
+      // Simulate the underlying orchestrator also reporting the error to the
+      // observer before the start() promise rejects. App must remain in a
+      // single error state (idempotency keeps state.error stable).
       void Promise.resolve().then(() => {
         opts.onError(new Error('sdp failed'))
       })
@@ -495,8 +503,57 @@ describe('App — error paths', () => {
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
     await new Promise((r) => setTimeout(r, 0))
-    expect(app.store.getState().status).toBe('error')
+    const state = app.store.getState()
+    expect(state.status).toBe('error')
+    expect(state.error?.code).toBe('rtc_error')
+    expect(state.error?.message).toBe('sdp failed')
     expect(stopMock).toHaveBeenCalled()
+    await app.dispose()
+  })
+
+  it('onError observer alone (no start() rejection) does NOT dispatch ERROR', async () => {
+    // F2: onError is a passive observer. It fires when the orchestrator wants
+    // to surface a non-fatal warning (e.g. data-channel error after the call
+    // has been established). The App must not flip to `error` status from a
+    // bare onError invocation that did not originate from a start() failure.
+    const { client, calls } = makeRtcClient()
+    const createRtcClient: AppDeps['createRtcClient'] = (opts) => {
+      calls.callbacks.onStateChange = opts.onStateChange
+      calls.callbacks.onError = opts.onError
+      return client
+    }
+    const app = new App(defaultCfg(), {
+      bridgeFactory: () => Promise.reject(new EvenBridgeInitError('timeout', 'no host')),
+      mockBridgeFactory: () => createMockBridge(),
+      acquireMic: () => Promise.resolve(makeMicStream()),
+      createSession: vi.fn().mockResolvedValue({
+        clientSecret: 's',
+        expiresAt: 'e',
+        model: 'm',
+      }),
+      createRtcClient,
+      attachAudio: vi.fn(),
+      detachAudio: vi.fn(),
+      setIntervalImpl: () => 0,
+      clearIntervalImpl: () => {
+        // noop
+      },
+      now: () => 0,
+      log: () => {
+        // noop
+      },
+    })
+    await app.boot()
+    app.dispatch({ type: 'START_REQUESTED' })
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    calls.callbacks.onStateChange?.('connected')
+    expect(app.store.getState().status).toBe('live')
+    // Simulate a non-fatal data-channel error reported via onError.
+    calls.callbacks.onError?.(new Error('data channel transient'))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(app.store.getState().status).toBe('live')
     await app.dispose()
   })
 
