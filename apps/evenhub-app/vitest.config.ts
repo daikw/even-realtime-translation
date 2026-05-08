@@ -8,10 +8,16 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     coverage: {
       provider: 'v8',
-      include: ['src/even/**/*.ts'],
+      include: ['src/even/**/*.ts', 'src/realtime/**/*.ts'],
       // Mocks (`*.mock.ts`) and barrel re-exports are exercised via dependents,
       // so excluding them keeps the coverage signal focused on real logic.
-      exclude: ['src/even/**/*.test.ts', 'src/even/**/*.mock.ts', 'src/even/index.ts'],
+      exclude: [
+        'src/even/**/*.test.ts',
+        'src/even/**/*.mock.ts',
+        'src/even/index.ts',
+        'src/realtime/**/*.test.ts',
+        'src/realtime/index.ts',
+      ],
       thresholds: {
         statements: 80,
         branches: 80,
