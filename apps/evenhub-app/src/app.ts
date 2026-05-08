@@ -1,0 +1,399 @@
+import type { EvenAppBridge } from '@evenrealities/even_hub_sdk'
+import {
+  EvenBridgeInitError,
+  HudDisplay,
+  initBridge,
+  subscribeInput,
+  subscribeLifecycle,
+} from './even/index.js'
+import { createMockBridge } from './even/bridge.mock.js'
+import {
+  SubtitleBuffer,
+  renderForStatus,
+  type HudViewModel,
+} from './hud/index.js'
+import { createWebRtcTranslationClient, type WebRtcTranslationClient } from './realtime/index.js'
+import {
+  TranslationApiError,
+  createTranslationSession,
+} from './backend/apiClient.js'
+import {
+  MicPermissionDeniedError,
+  acquirePhoneMic,
+  stopMediaStream,
+} from './audio/phoneMic.js'
+import { attachAudioElement, disposeAudioElement } from './audio/audioPlayer.js'
+import type { AppConfig } from './config.js'
+import { createStore, type Store } from './state/store.js'
+import { appReducer } from './state/reducer.js'
+import { INITIAL_STATE, type AppState } from './state/appState.js'
+import type { AppAction } from './state/actions.js'
+import { handleInputEvent } from './state/inputHandler.js'
+
+const APP_VERSION = '0.1.0'
+const DEVICE_ID = 'G2'
+const TICK_INTERVAL_MS = 1000
+
+/**
+ * Boundary between the pure reducer/store and all the I/O the app needs:
+ *
+ *  - Even Hub bridge handshake + lifecycle/input subscriptions
+ *  - HUD render fan-out from store changes
+ *  - Translation session lifecycle (mic acquisition, backend call,
+ *    WebRTC client start/stop)
+ *  - Periodic tick that drives the elapsed clock
+ *
+ * The class is intentionally constructor-injected so tests can swap every
+ * external dependency (bridge factory, mic acquirer, backend client, RTC
+ * client factory) without `vi.mock`. `boot()` does only what `main.ts` would
+ * inline; `start()`, `stop()`, `dispose()` are public for ad-hoc test driving.
+ */
+
+type BridgeFactory = () => Promise<EvenAppBridge>
+
+type MicAcquirer = () => Promise<MediaStream>
+
+type SessionCreator = (req: {
+  backendUrl: string
+  request: {
+    targetLanguage: 'en' | 'ja' | 'es' | 'fr' | 'ko'
+    sourceHint: AppState['languagePair']['source']
+    userId: string
+    client: { appVersion: string; device: string }
+  }
+}) => Promise<{ clientSecret: string; expiresAt: string; model: string }>
+
+type RtcClientFactory = (opts: {
+  clientSecret: string
+  sourceStream: MediaStream
+  onOutputTranscriptDelta: (delta: { text: string }) => void
+  onRemoteAudioTrack: (track: MediaStreamTrack) => void
+  onStateChange: (state: RTCPeerConnectionState) => void
+  onError: (err: Error) => void
+  baseUrl?: string
+  model?: string
+}) => WebRtcTranslationClient
+
+export interface AppDeps {
+  bridgeFactory?: BridgeFactory
+  mockBridgeFactory?: () => EvenAppBridge
+  acquireMic?: MicAcquirer
+  createSession?: SessionCreator
+  createRtcClient?: RtcClientFactory
+  attachAudio?: (track: MediaStreamTrack) => void
+  detachAudio?: () => void
+  /** Test seam — defaults to `setInterval`. */
+  setIntervalImpl?: (fn: () => void, ms: number) => unknown
+  clearIntervalImpl?: (handle: unknown) => void
+  /** Test seam — defaults to `Date.now`. */
+  now?: () => number
+  log?: (...args: unknown[]) => void
+}
+
+interface ActiveSession {
+  client: WebRtcTranslationClient
+  mic: MediaStream
+}
+
+export class App {
+  readonly store: Store<AppState, AppAction>
+  private readonly cfg: AppConfig
+  private readonly deps: Required<AppDeps>
+
+  private bridge: EvenAppBridge | null = null
+  private display: HudDisplay | null = null
+  private subtitleBuffer: SubtitleBuffer | null = null
+  private session: ActiveSession | null = null
+  private tickHandle: unknown = null
+  private renderUnsubscribe: (() => void) | null = null
+  private inputUnsubscribe: (() => void) | null = null
+  private lifecycleUnsubscribe: (() => void) | null = null
+  private startInFlight = false
+  private disposed = false
+
+  constructor(cfg: AppConfig, deps: AppDeps = {}) {
+    this.cfg = cfg
+    this.store = createStore<AppState, AppAction>(appReducer, INITIAL_STATE)
+
+    this.deps = {
+      bridgeFactory: deps.bridgeFactory ?? (() => initBridge({ timeoutMs: 5000 })),
+      mockBridgeFactory: deps.mockBridgeFactory ?? (() => createMockBridge()),
+      acquireMic: deps.acquireMic ?? (() => acquirePhoneMic()),
+      createSession: deps.createSession ?? createTranslationSession,
+      createRtcClient: deps.createRtcClient ?? createWebRtcTranslationClient,
+      attachAudio:
+        deps.attachAudio ??
+        ((track) => {
+          attachAudioElement(track)
+        }),
+      detachAudio:
+        deps.detachAudio ??
+        (() => {
+          disposeAudioElement()
+        }),
+      setIntervalImpl: deps.setIntervalImpl ?? ((fn, ms) => setInterval(fn, ms)),
+      clearIntervalImpl:
+        deps.clearIntervalImpl ??
+        ((handle) => {
+          clearInterval(handle as ReturnType<typeof setInterval>)
+        }),
+      now: deps.now ?? (() => Date.now()),
+      log:
+        deps.log ??
+        ((...args) => {
+          if (this.cfg.dev) {
+            // Dev-only: never logs transcripts or audio data; only operational
+            // signals (status changes, error codes).
+            console.log('[evenhub-app]', ...args)
+          }
+        }),
+    }
+  }
+
+  /**
+   * Boot sequence (§15.1). Returns when the bridge handshake + HUD container
+   * are ready and the store is in `idle`. Throws if the bridge can't be
+   * acquired (and mock fallback is disabled).
+   */
+  async boot(): Promise<void> {
+    if (this.disposed) throw new Error('App.boot called after dispose')
+
+    this.bridge = await this.acquireBridge()
+
+    this.display = new HudDisplay(this.bridge)
+    await this.display.setupPage({ containerId: 1 })
+
+    this.subtitleBuffer = new SubtitleBuffer({
+      onRender: (text) => {
+        this.store.dispatch({ type: 'SUBTITLE_UPDATED', text })
+      },
+    })
+
+    this.renderUnsubscribe = this.store.subscribe((state) => {
+      this.renderHud(state)
+    })
+
+    this.inputUnsubscribe = subscribeInput(this.bridge, (event) => {
+      handleInputEvent(event, this.store)
+    })
+
+    this.lifecycleUnsubscribe = subscribeLifecycle(this.bridge, (event) => {
+      // Phase 1: only respond to abnormal exit. Foreground transitions are
+      // logged but don't drive state — the SDK keeps the session alive and
+      // the user pauses explicitly.
+      if (event.kind === 'abnormalExit' || event.kind === 'systemExit') {
+        this.store.dispatch({ type: 'STOP_REQUESTED' })
+      }
+    })
+
+    // Subscribe to status transitions that need side effects (start/stop).
+    this.store.subscribe((state) => {
+      void this.onStatusChange(state)
+    })
+
+    this.tickHandle = this.deps.setIntervalImpl(() => {
+      this.store.dispatch({ type: 'TICK', nowMs: this.deps.now() })
+    }, TICK_INTERVAL_MS)
+
+    this.store.dispatch({ type: 'BOOT_COMPLETED' })
+  }
+
+  /** Public test hook: drive a state transition then run side effects. */
+  dispatch(action: AppAction): void {
+    this.store.dispatch(action)
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return
+    this.disposed = true
+
+    if (this.tickHandle !== null) {
+      this.deps.clearIntervalImpl(this.tickHandle)
+      this.tickHandle = null
+    }
+
+    this.renderUnsubscribe?.()
+    this.inputUnsubscribe?.()
+    this.lifecycleUnsubscribe?.()
+
+    await this.shutdownSession()
+
+    this.subtitleBuffer?.dispose()
+    this.subtitleBuffer = null
+
+    this.display?.dispose()
+    this.display = null
+
+    this.deps.detachAudio()
+
+    if (this.bridge !== null) {
+      try {
+        await this.bridge.shutDownPageContainer(1)
+      } catch (err) {
+        this.deps.log('shutDownPageContainer failed', err)
+      }
+      this.bridge = null
+    }
+  }
+
+  private async acquireBridge(): Promise<EvenAppBridge> {
+    try {
+      return await this.deps.bridgeFactory()
+    } catch (err) {
+      if (this.cfg.useMockBridge && err instanceof EvenBridgeInitError) {
+        this.deps.log('Falling back to mock bridge:', err.reason)
+        return this.deps.mockBridgeFactory()
+      }
+      throw err
+    }
+  }
+
+  private renderHud(state: AppState): void {
+    if (this.display === null) return
+    const vm: HudViewModel = {
+      status: state.status,
+      languagePair: state.languagePair,
+      connection: state.connection,
+      elapsedSeconds: state.elapsedSeconds,
+      subtitle: state.activeSubtitle,
+    }
+    const text = renderForStatus(vm)
+    void this.display.upgradeText(text)
+  }
+
+  private prevStatus: AppState['status'] | null = null
+
+  private async onStatusChange(state: AppState): Promise<void> {
+    const prev = this.prevStatus
+    if (prev === state.status) return
+    this.prevStatus = state.status
+
+    if (prev !== 'connecting' && state.status === 'connecting') {
+      // First entry into connecting → kick off the actual session.
+      await this.startSession()
+      return
+    }
+    if (state.status === 'exiting') {
+      await this.shutdownSession()
+      this.store.dispatch({ type: 'EXITED' })
+    }
+  }
+
+  private async startSession(): Promise<void> {
+    if (this.startInFlight) return
+    this.startInFlight = true
+    try {
+      const state = this.store.getState()
+
+      let mic: MediaStream
+      try {
+        mic = await this.deps.acquireMic()
+      } catch (err) {
+        if (err instanceof MicPermissionDeniedError) {
+          this.store.dispatch({ type: 'PERMISSION_DENIED', reason: 'mic' })
+          return
+        }
+        this.store.dispatch({
+          type: 'ERROR',
+          code: 'mic_error',
+          message: err instanceof Error ? err.message : 'mic acquisition failed',
+        })
+        return
+      }
+
+      // Build the request body separately so we never log it. clientSecret is
+      // memory-only — never stored anywhere persistent (§10.1).
+      const target = state.languagePair.target
+      if (target === 'auto') {
+        // Defensive guard: the rotation never lands on `auto`, but TypeScript
+        // doesn't know that here.
+        this.store.dispatch({
+          type: 'ERROR',
+          code: 'invalid_target',
+          message: 'auto cannot be the target language',
+        })
+        stopMediaStream(mic)
+        return
+      }
+
+      let session: { clientSecret: string; expiresAt: string; model: string }
+      try {
+        session = await this.deps.createSession({
+          backendUrl: this.cfg.backendUrl,
+          request: {
+            targetLanguage: target,
+            sourceHint: state.languagePair.source,
+            userId: 'anonymous',
+            client: { appVersion: APP_VERSION, device: DEVICE_ID },
+          },
+        })
+      } catch (err) {
+        const code = err instanceof TranslationApiError ? err.code : 'backend_error'
+        const message = err instanceof Error ? err.message : 'backend unavailable'
+        this.store.dispatch({ type: 'ERROR', code, message })
+        stopMediaStream(mic)
+        return
+      }
+
+      const client = this.deps.createRtcClient({
+        clientSecret: session.clientSecret,
+        sourceStream: mic,
+        onOutputTranscriptDelta: (delta) => {
+          this.subtitleBuffer?.append(delta.text)
+        },
+        onRemoteAudioTrack: (track) => {
+          this.deps.attachAudio(track)
+        },
+        onStateChange: (rtcState) => {
+          if (rtcState === 'connected') {
+            this.store.dispatch({ type: 'CONNECTED', startedAt: this.deps.now() })
+          } else if (rtcState === 'failed' || rtcState === 'disconnected') {
+            this.store.dispatch({
+              type: 'CONNECTION_STATE_CHANGED',
+              state: rtcState === 'failed' ? 'failed' : 'disconnected',
+            })
+          }
+        },
+        onError: (err) => {
+          this.deps.log('RTC error', err.name)
+          this.store.dispatch({
+            type: 'ERROR',
+            code: 'rtc_error',
+            message: err.message,
+          })
+        },
+        baseUrl: this.cfg.openaiBaseUrl,
+        model: this.cfg.modelName,
+      })
+
+      this.session = { client, mic }
+
+      try {
+        await client.start()
+      } catch (err) {
+        this.deps.log('client.start failed', err)
+        // onError already dispatched ERROR via the client's reporter; ensure
+        // the session reference is dropped so subsequent retries get a fresh
+        // client.
+        await this.shutdownSession()
+      }
+    } finally {
+      this.startInFlight = false
+    }
+  }
+
+  private async shutdownSession(): Promise<void> {
+    const session = this.session
+    if (session === null) return
+    this.session = null
+
+    try {
+      await session.client.stop()
+    } catch (err) {
+      this.deps.log('client.stop failed', err)
+    }
+    stopMediaStream(session.mic)
+    this.subtitleBuffer?.clear()
+    this.deps.detachAudio()
+  }
+}
