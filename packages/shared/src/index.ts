@@ -1,3 +1,31 @@
-// Placeholder for shared types, language definitions, and formatting utilities.
-// Implemented in M1 (see Task #2).
-export {}
+// Type re-exports (must use `export type` under verbatimModuleSyntax-style
+// boundaries so consumers don't accidentally import nothing at runtime).
+export type {
+  AppState,
+  AppStatus,
+  ConnectionStatus,
+  LanguageCode,
+  LanguagePair,
+} from './types/state.js'
+export type {
+  RealtimeServerEvent,
+  SubtitleSegment,
+  TranscriptDelta,
+} from './types/translation.js'
+export type {
+  ApiError,
+  TranslationSessionRequest,
+  TranslationSessionResponse,
+} from './types/api.js'
+
+// Runtime exports.
+export {
+  DEFAULT_LANGUAGE_PAIR,
+  LANGUAGE_LABELS,
+  SUPPORTED_LANGUAGES,
+  isLanguageCode,
+  nextTargetLanguage,
+} from './language.js'
+export { breakLines, charWidth, stringWidth, truncate } from './formatting/lineBreak.js'
+export { findSegmentBoundary } from './formatting/segmentBoundary.js'
+export { computeSafetyIdentifier } from './formatting/safetyIdentifier.js'
