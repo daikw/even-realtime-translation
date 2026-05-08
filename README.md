@@ -71,6 +71,18 @@ cp .env.example .env  # 必要な値を埋める
 - **M7** 統合テスト + Test Plan
 - **M8** Security review + 最終 PR
 
+## Even Hub packaging notes
+
+- `apps/evenhub-app/app.json` の `permissions[].whitelist` は PoC 用に `http://localhost:3000` を含む。本番 backend ドメインが決まったら差し替える。
+- Even Hub SDK は `@evenrealities/even_hub_sdk@0.0.10` を exact pin。設計書 §9.1 の `min_sdk_version` と一致。
+- QR sideload や `evenhub pack` の手順は `docs/realtime-translation-eveng2-mvp-design.md` §22 を参照。
+
+## Supply-chain notes
+
+- 全依存は `--save-exact` で固定し、`pnpm-lock.yaml` をコミット。
+- pnpm の install script は default で無効 (`Ignored build scripts: esbuild` の警告は意図的)。エディタ向けの native binary が必要になった時点で `pnpm approve-builds` で個別に許可する。
+- 依存追加時は `~/.claude/rules/supply-chain-security.md` の手順に従い、registry 上のメタを目視確認する。
+
 ## License
 
 MIT. See [`LICENSE`](./LICENSE).
