@@ -44,8 +44,33 @@ export class SdpExchangeError extends Error {
   }
 }
 
+/**
+ * Defensive scheme/host check (F5 / Sec M-3). The primary allowlist lives in
+ * loadAppConfig (apps/evenhub-app/src/config.ts) so misconfiguration is
+ * surfaced at boot, but we also enforce here so callers that bypass the
+ * config layer (e.g. tests, future renegotiation paths) can't accidentally
+ * exfiltrate the client secret to an attacker-controlled origin.
+ */
+function isAcceptableBaseUrl(raw: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return false
+  }
+  if (parsed.protocol === 'https:') return true
+  // Allow http loopback so local dev / proxies still work; never allow
+  // arbitrary http hosts.
+  if (parsed.protocol === 'http:') {
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+  }
+  return false
+}
+
 export async function exchangeSdp(opts: ExchangeSdpOptions): Promise<string> {
-  const baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
+  const candidate = opts.baseUrl ?? DEFAULT_BASE_URL
+  const safeBaseUrl = isAcceptableBaseUrl(candidate) ? candidate : DEFAULT_BASE_URL
+  const baseUrl = safeBaseUrl.replace(/\/+$/, '')
   const model = opts.model ?? DEFAULT_MODEL
   const url = `${baseUrl}/v1/realtime/translations/calls?model=${encodeURIComponent(model)}`
   const fetchImpl = opts.fetchImpl ?? fetch

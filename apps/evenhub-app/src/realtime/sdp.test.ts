@@ -124,4 +124,51 @@ describe('exchangeSdp', () => {
       exchangeSdp({ offerSdp: OFFER_SDP, clientSecret: SECRET, fetchImpl }),
     ).rejects.toThrow(/network down/)
   })
+
+  it('falls back to the default base URL when given an http://attacker host (F5)', async () => {
+    let capturedUrl = ''
+    const fetchImpl = fakeFetch((url) => {
+      capturedUrl = String(url)
+      return new Response(ANSWER_SDP, { status: 200 })
+    })
+    await exchangeSdp({
+      offerSdp: OFFER_SDP,
+      clientSecret: SECRET,
+      baseUrl: 'http://attacker.example',
+      fetchImpl,
+    })
+    // Defensive guard: scheme http:// against a non-loopback host is rejected,
+    // request goes to the canonical OpenAI host instead.
+    expect(capturedUrl.startsWith('https://api.openai.com')).toBe(true)
+  })
+
+  it('accepts http://localhost for local dev proxies', async () => {
+    let capturedUrl = ''
+    const fetchImpl = fakeFetch((url) => {
+      capturedUrl = String(url)
+      return new Response(ANSWER_SDP, { status: 200 })
+    })
+    await exchangeSdp({
+      offerSdp: OFFER_SDP,
+      clientSecret: SECRET,
+      baseUrl: 'http://localhost:8787',
+      fetchImpl,
+    })
+    expect(capturedUrl.startsWith('http://localhost:8787/')).toBe(true)
+  })
+
+  it('falls back to default for an unparseable base URL', async () => {
+    let capturedUrl = ''
+    const fetchImpl = fakeFetch((url) => {
+      capturedUrl = String(url)
+      return new Response(ANSWER_SDP, { status: 200 })
+    })
+    await exchangeSdp({
+      offerSdp: OFFER_SDP,
+      clientSecret: SECRET,
+      baseUrl: 'definitely not a url',
+      fetchImpl,
+    })
+    expect(capturedUrl.startsWith('https://api.openai.com')).toBe(true)
+  })
 })

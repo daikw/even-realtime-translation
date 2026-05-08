@@ -41,13 +41,64 @@ function readString(value: unknown, fallback: string): string {
   return value.length === 0 ? fallback : value
 }
 
+/**
+ * Allowlist for the OpenAI base URL (F5 / Sec M-3).
+ *
+ * `PUBLIC_OPENAI_BASE_URL` is build-time injected by Vite and consumed by
+ * {@link import('./realtime/sdp.js').exchangeSdp} when POSTing the SDP offer
+ * along with the short-lived client secret. A poisoned env var (build-time
+ * injection, supply-chain attack) could otherwise redirect the offer + secret
+ * to an attacker-controlled host.
+ *
+ * Policy:
+ * - Production (`DEV !== true`): only `https://api.openai.com` is accepted.
+ * - Development (`DEV === true`): `http://localhost*` and `http://127.0.0.1*`
+ *   are also accepted to allow local proxies / staging.
+ * - Anything else falls back to the canonical default with a console.warn.
+ */
+function validateOpenaiBaseUrl(raw: string, dev: boolean): string {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    console.warn(
+      '[config] PUBLIC_OPENAI_BASE_URL is not a valid URL; falling back to',
+      DEFAULT_OPENAI_BASE_URL,
+    )
+    return DEFAULT_OPENAI_BASE_URL
+  }
+
+  // Canonical production target.
+  if (parsed.protocol === 'https:' && parsed.host === 'api.openai.com') {
+    return raw
+  }
+
+  if (dev) {
+    // Allow loopback proxies during local dev only.
+    if (
+      parsed.protocol === 'http:' &&
+      (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+    ) {
+      return raw
+    }
+  }
+
+  console.warn(
+    '[config] PUBLIC_OPENAI_BASE_URL host not in allowlist; falling back to',
+    DEFAULT_OPENAI_BASE_URL,
+  )
+  return DEFAULT_OPENAI_BASE_URL
+}
+
 export function loadAppConfig(env: ImportMetaEnv = import.meta.env): AppConfig {
   const e = env as unknown as MaybeEnv
+  const dev = e.DEV === true
+  const rawOpenaiBaseUrl = readString(e.PUBLIC_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL)
   return {
     backendUrl: readString(e.PUBLIC_BACKEND_URL, DEFAULT_BACKEND_URL),
-    openaiBaseUrl: readString(e.PUBLIC_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL),
+    openaiBaseUrl: validateOpenaiBaseUrl(rawOpenaiBaseUrl, dev),
     modelName: readString(e.PUBLIC_MODEL_NAME, DEFAULT_MODEL_NAME),
     useMockBridge: e.PUBLIC_USE_MOCK_BRIDGE === 'true',
-    dev: e.DEV === true,
+    dev,
   }
 }
