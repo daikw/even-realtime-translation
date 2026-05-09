@@ -557,6 +557,62 @@ describe('App — error paths', () => {
     await app.dispose()
   })
 
+  it('exiting: subtitle buffer is disposed before any further upgradeText (F8)', async () => {
+    // F8 / Codex M-4: when STOP_REQUESTED flips status to 'exiting', the
+    // App must dispose the SubtitleBuffer up-front so a stale 150ms-throttled
+    // render of empty text cannot fire after the 'Closing...' screen has been
+    // shown. Verify the dispose happens by attempting to push a delta after
+    // STOP_REQUESTED — it must not change activeSubtitle, and no further
+    // SUBTITLE_UPDATED reaches the reducer.
+    const { client, calls } = makeRtcClient()
+    const createRtcClient: AppDeps['createRtcClient'] = (opts) => {
+      calls.callbacks.onOutputTranscriptDelta = opts.onOutputTranscriptDelta
+      calls.callbacks.onStateChange = opts.onStateChange
+      return client
+    }
+    const app = new App(defaultCfg(), {
+      bridgeFactory: () => Promise.reject(new EvenBridgeInitError('timeout', 'no host')),
+      mockBridgeFactory: () => createMockBridge(),
+      acquireMic: () => Promise.resolve(makeMicStream()),
+      createSession: vi.fn().mockResolvedValue({
+        clientSecret: 's',
+        expiresAt: 'e',
+        model: 'm',
+      }),
+      createRtcClient,
+      attachAudio: vi.fn(),
+      detachAudio: vi.fn(),
+      setIntervalImpl: () => 0,
+      clearIntervalImpl: () => {
+        // noop
+      },
+      now: () => 1000,
+      log: () => {
+        // noop
+      },
+    })
+    await app.boot()
+    app.dispatch({ type: 'START_REQUESTED' })
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    await new Promise((r) => setTimeout(r, 0))
+    calls.callbacks.onStateChange?.('connected')
+
+    // Push some live deltas so the buffer is dirty.
+    calls.callbacks.onOutputTranscriptDelta?.({ text: 'hello' })
+    await new Promise((r) => setTimeout(r, 200))
+    expect(app.store.getState().activeSubtitle).toContain('hello')
+
+    app.dispatch({ type: 'STOP_REQUESTED' })
+    expect(app.store.getState().status).toBe('exiting')
+    // After exit, deltas reaching the buffer must be no-ops (buffer disposed).
+    calls.callbacks.onOutputTranscriptDelta?.({ text: 'should-not-render' })
+    await new Promise((r) => setTimeout(r, 200))
+    // activeSubtitle should not have absorbed the post-exit delta.
+    expect(app.store.getState().activeSubtitle).not.toContain('should-not-render')
+    await app.dispose()
+  })
+
   it('non-Error mic rejection still surfaces as mic_error', async () => {
     const { client } = makeRtcClient()
     const app = new App(defaultCfg(), {

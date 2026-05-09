@@ -304,6 +304,14 @@ export class App {
       return
     }
     if (state.status === 'exiting') {
+      // F8 / Codex M-4: dispose the subtitle buffer FIRST so any pending
+      // 150ms-throttled render that would otherwise fire after the
+      // 'Closing...' screen is cancelled. Subsequent append/clear calls on
+      // the buffer are guaranteed no-ops post-dispose, which prevents an
+      // empty subtitle from briefly overwriting the exit screen during
+      // teardown microtasks.
+      this.subtitleBuffer?.dispose()
+      this.subtitleBuffer = null
       // Cancel any pending reconnect timer so we don't race with teardown.
       this.reconnectController.reset()
       await this.shutdownSession()
