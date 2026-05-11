@@ -115,24 +115,13 @@ export class HudDisplay {
 
     this.containerId = opts.containerId
     this.setupPromise = (async () => {
-      // Subtitle: full-frame text container, no input capture.
-      const text = new TextContainerProperty({
-        containerID: opts.containerId,
-        containerName: 'subtitle',
-        xPosition: 0,
-        yPosition: 0,
-        width: 576,
-        height: 288,
-        isEventCapture: 0,
-        content: ' ',
-      })
-
-      // Input sink: a 1×1 list container off in the top-left corner. The
-      // SDK README's canonical pattern puts isEventCapture=1 on a list
-      // container (text containers cannot legally carry the flag on real
-      // hardware — firmware returns StartUpPageCreateResult.invalid).
-      // Single dummy item is enough to satisfy the property; selection
-      // metadata is ignored because we only consume eventType.
+      // Invisible 1×1 list container parked in the very top-left pixel.
+      // Its sole purpose is to carry `isEventCapture=1` because the SDK
+      // README requires *exactly one* container to hold that flag and the
+      // canonical pattern puts it on a list (real firmware rejects the
+      // flag on a text container with StartUpPageCreateResult.invalid).
+      // We keep a single placeholder item because a list with zero items
+      // is also rejected by some hosts.
       const inputSink = new ListContainerProperty({
         containerID: INPUT_LIST_CONTAINER_ID,
         containerName: 'input',
@@ -147,6 +136,20 @@ export class HudDisplay {
         }),
       })
 
+      // Subtitle: full-frame text container, no input capture. content is
+      // a whitespace placeholder that the first `upgradeText` overwrites
+      // within ~150ms.
+      const text = new TextContainerProperty({
+        containerID: opts.containerId,
+        containerName: 'subtitle',
+        xPosition: 0,
+        yPosition: 0,
+        width: 576,
+        height: 288,
+        isEventCapture: 0,
+        content: ' ',
+      })
+
       const container = new CreateStartUpPageContainer({
         containerTotalNum: 2,
         listObject: [inputSink],
@@ -154,8 +157,15 @@ export class HudDisplay {
       })
 
       const result = await this.bridge.createStartUpPageContainer(container)
-      // SDK normalizes both numeric and named results; treat anything other
-      // than `success` (0) as a setup failure so callers can surface it.
+      // Per SDK README: createStartUpPageContainer "must be called only once
+      // when first starting the glasses UI". On subsequent boots (e.g. Vite
+      // HMR page reloads, or a re-mount inside the same Even Realities App
+      // session) the host returns `invalid` because a page is already up.
+      // Treat that as a no-op: textContainerUpgrade calls will repaint the
+      // existing container just fine.
+      if (result === StartUpPageCreateResult.invalid) {
+        return
+      }
       if (result !== StartUpPageCreateResult.success) {
         throw new Error(
           `createStartUpPageContainer failed: ${StartUpPageCreateResult[result] ?? String(result)}`,

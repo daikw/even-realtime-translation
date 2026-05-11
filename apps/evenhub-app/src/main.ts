@@ -23,9 +23,6 @@ if (typeof window !== 'undefined' && (globalThis as { __VITEST__?: unknown }).__
   void boot().catch((err: unknown) => {
     // Surfacing boot errors via console is acceptable here — these are
     // operational signals (timeout, missing bridge), never user content.
-    // Stringify message + stack so the Vite client-log proxy forwards the
-    // full diagnostic instead of collapsing the Error object to a single
-    // location line.
     const message = err instanceof Error ? err.message : String(err)
     const stack = err instanceof Error && err.stack !== undefined ? err.stack : ''
     console.error('[evenhub-app] boot failed:', message, stack)

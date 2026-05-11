@@ -89,7 +89,15 @@ function isTouchEventSource(source: EventSourceType | undefined): boolean {
 function resolveKind(event: EvenHubEvent): AppInputEventKind | null {
   const list: List_ItemEvent | undefined = event.listEvent
   if (list !== undefined) {
-    return mapEventType(list.eventType)
+    if (list.eventType !== undefined) {
+      return mapEventType(list.eventType)
+    }
+    // Real-device firmware (and the simulator) drop `eventType` when it
+    // equals 0 (CLICK_EVENT) because the proto JSON serializer omits enum
+    // defaults. Verified via WebInspector on the G2: a frame-tap delivers
+    //   {"listEvent":{"containerID":2,"containerName":"list-1"}}
+    // with no eventType at all. Treat the omission as CLICK_EVENT.
+    return 'singlePress'
   }
 
   const sys: Sys_ItemEvent | undefined = event.sysEvent
