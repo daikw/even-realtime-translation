@@ -15,3 +15,6 @@ coverage
 # Playwright MCP screenshots / snapshots from interactive smokes
 .playwright-mcp/
 apps/evenhub-app/smoke-*.png
+
+# Vite local cache / pre-bundles
+.vite/
