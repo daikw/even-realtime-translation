@@ -1,4 +1,5 @@
 import {
+  EventSourceType,
   OsEventTypeList,
   type EvenAppBridge,
   type EvenHubEvent,
@@ -58,12 +59,43 @@ function mapEventType(eventType: OsEventTypeList | undefined): AppInputEventKind
   }
 }
 
-function extractInputPayload(event: EvenHubEvent): Sys_ItemEvent | Text_ItemEvent | null {
-  // sysEvent carries G2/R1 touch + system events; textEvent carries text
-  // container interactions. listEvent is list-specific; we don't currently
-  // map it because the M0-M2 HUD has no list containers.
-  if (event.sysEvent !== undefined) return event.sysEvent
-  if (event.textEvent !== undefined) return event.textEvent
+function isTouchEventSource(source: EventSourceType | undefined): boolean {
+  return (
+    source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R ||
+    source === EventSourceType.TOUCH_EVENT_FROM_RING ||
+    source === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L
+  )
+}
+
+/**
+ * Resolve the input kind from an EvenHubEvent.
+ *
+ * - `textEvent`: the event came from an `isEventCapture` text container.
+ *   `eventType` is reliably present and maps via `mapEventType`.
+ * - `sysEvent`: touch events from the glasses/ring (and lifecycle/IMU).
+ *   The official simulator (>=0.7.3) and at least some firmware builds
+ *   *omit* `eventType` when it equals 0 (`CLICK_EVENT`) because the proto
+ *   JSON serializer drops fields that match the enum default. So when
+ *   `sysEvent.eventType` is undefined AND `eventSource` indicates a touch
+ *   path, we infer `CLICK_EVENT` rather than silently dropping the input.
+ *   Lifecycle / IMU sys events are intentionally dropped here (they have no
+ *   touch eventSource) and surfaced via `subscribeLifecycle` instead.
+ */
+function resolveKind(event: EvenHubEvent): AppInputEventKind | null {
+  const sys: Sys_ItemEvent | undefined = event.sysEvent
+  if (sys !== undefined) {
+    if (sys.eventType === undefined) {
+      if (isTouchEventSource(sys.eventSource)) return 'singlePress'
+      return null
+    }
+    return mapEventType(sys.eventType)
+  }
+
+  const text: Text_ItemEvent | undefined = event.textEvent
+  if (text !== undefined) {
+    return mapEventType(text.eventType)
+  }
+
   return null
 }
 
@@ -80,10 +112,7 @@ export function subscribeInput(
   handler: (event: AppInputEvent) => void,
 ): () => void {
   return bridge.onEvenHubEvent((event) => {
-    const payload = extractInputPayload(event)
-    if (payload === null) return
-
-    const kind = mapEventType(payload.eventType)
+    const kind = resolveKind(event)
     if (kind === null) return
 
     handler({ kind, raw: event })

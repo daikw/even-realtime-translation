@@ -127,6 +127,40 @@ describe('subscribeInput', () => {
     expect(handler.mock.calls[0]?.[0].raw).toBe(raw)
   })
 
+  it('infers CLICK_EVENT when sysEvent has touch eventSource but no eventType (simulator quirk)', () => {
+    // Regression for evenhub-simulator 0.7.3 + at least some firmware builds:
+    // they omit `eventType` when it equals 0 (`CLICK_EVENT`) because the proto
+    // JSON serializer drops fields that match the enum default. Confirmed via
+    // the simulator's /api/console: a Click button press emits
+    //   {"sysEvent":{"eventSource":1}}
+    // with no eventType field at all.
+    const { bridge, emit } = makeBridge()
+    const handler = vi.fn<(e: AppInputEvent) => void>()
+    subscribeInput(asBridge(bridge), handler)
+
+    emit({
+      sysEvent: new Sys_ItemEvent({
+        eventSource: EventSourceType.TOUCH_EVENT_FROM_GLASSES_R,
+      }),
+    })
+
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler.mock.calls[0]?.[0].kind).toBe('singlePress')
+  })
+
+  it('does NOT infer CLICK for a sysEvent without touch eventSource (lifecycle path)', () => {
+    // A sysEvent lacking both eventType and a touch source should be dropped,
+    // not treated as a click. This guards against forwarding lifecycle / IMU
+    // events into the input handler when the simulator quirk fires.
+    const { bridge, emit } = makeBridge()
+    const handler = vi.fn<(e: AppInputEvent) => void>()
+    subscribeInput(asBridge(bridge), handler)
+
+    emit({ sysEvent: new Sys_ItemEvent({}) })
+
+    expect(handler).not.toHaveBeenCalled()
+  })
+
   it('drops lifecycle event types (forwarded by subscribeLifecycle instead)', () => {
     const { bridge, emit } = makeBridge()
     const handler = vi.fn<(e: AppInputEvent) => void>()
