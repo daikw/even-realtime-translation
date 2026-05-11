@@ -28,6 +28,10 @@ export interface BuildServerOptions {
    * by `realtime-ws.test.ts` to point the relay at an in-process mock server.
    */
   upstreamWsUrl?: string
+  /** Shorten WS idle timeout for tests. Production default = 30 s. */
+  realtimeWsIdleTimeoutMs?: number
+  /** Shorten WS graceful-close period for tests. Production default = 6 s. */
+  realtimeWsGracePeriodMs?: number
 }
 
 interface SessionRequestBody {
@@ -179,6 +183,12 @@ export function buildServer(opts: BuildServerOptions = {}): FastifyInstance {
   registerRealtimeWs(app, {
     config,
     ...(opts.upstreamWsUrl !== undefined ? { upstreamUrl: opts.upstreamWsUrl } : {}),
+    ...(opts.realtimeWsIdleTimeoutMs !== undefined
+      ? { idleTimeoutMs: opts.realtimeWsIdleTimeoutMs }
+      : {}),
+    ...(opts.realtimeWsGracePeriodMs !== undefined
+      ? { gracePeriodMs: opts.realtimeWsGracePeriodMs }
+      : {}),
   })
 
   app.setErrorHandler((err: unknown, _req, reply) => {

@@ -27,12 +27,21 @@ interface AppHandle {
   port: number
 }
 
+interface UpstreamCapture {
+  /** Pop the next message that arrived on this upstream socket. */
+  nextMessage(): Promise<unknown>
+  /** All messages received on this upstream socket so far. */
+  readonly messages: unknown[]
+}
+
 interface UpstreamMock {
   url: string
   /** All upstream sockets that have been accepted, in connection order. */
   sockets: WsClient[]
   /** Resolves once the next upstream connection is established. */
   nextConnection: () => Promise<WsClient>
+  /** Per-socket message capture by index; lazily created on first read. */
+  capture(socketIndex: number): UpstreamCapture
   close: () => Promise<void>
 }
 
@@ -44,6 +53,19 @@ const TEST_CONFIG = {
   allowedOrigins: ['http://localhost:5173', 'http://127.0.0.1:5173'],
 }
 
+function parseRawData(raw: RawData): unknown {
+  const text = Buffer.isBuffer(raw)
+    ? raw.toString('utf-8')
+    : raw instanceof ArrayBuffer
+      ? Buffer.from(raw).toString('utf-8')
+      : Buffer.concat(raw).toString('utf-8')
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
 async function startUpstreamMock(
   onMessage?: (socket: WsClient, msg: unknown) => void | Promise<void>,
 ): Promise<UpstreamMock> {
@@ -52,25 +74,29 @@ async function startUpstreamMock(
   const address = server.address() as AddressInfo
   const sockets: WsClient[] = []
   const waiters: Array<(s: WsClient) => void> = []
+  const captures = new Map<number, { messages: unknown[]; queue: Array<(v: unknown) => void> }>()
+
+  function captureFor(idx: number): { messages: unknown[]; queue: Array<(v: unknown) => void> } {
+    let entry = captures.get(idx)
+    if (!entry) {
+      entry = { messages: [], queue: [] }
+      captures.set(idx, entry)
+    }
+    return entry
+  }
 
   server.on('connection', (socket) => {
+    const idx = sockets.length
     sockets.push(socket)
     const waiter = waiters.shift()
     if (waiter) waiter(socket)
     socket.on('message', (raw: RawData) => {
-      if (!onMessage) return
-      const text = Buffer.isBuffer(raw)
-        ? raw.toString('utf-8')
-        : raw instanceof ArrayBuffer
-          ? Buffer.from(raw).toString('utf-8')
-          : Buffer.concat(raw).toString('utf-8')
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(text)
-      } catch {
-        parsed = null
-      }
-      void onMessage(socket, parsed)
+      const parsed = parseRawData(raw)
+      const entry = captureFor(idx)
+      const w = entry.queue.shift()
+      if (w) w(parsed)
+      else entry.messages.push(parsed)
+      if (onMessage) void onMessage(socket, parsed)
     })
   })
 
@@ -80,10 +106,21 @@ async function startUpstreamMock(
     nextConnection(): Promise<WsClient> {
       const existing = sockets[sockets.length - 1]
       if (existing && existing.readyState === existing.OPEN) {
-        // A connection is already live; resolve with the most recent one.
         return Promise.resolve(existing)
       }
       return new Promise<WsClient>((resolve) => waiters.push(resolve))
+    },
+    capture(idx: number): UpstreamCapture {
+      const entry = captureFor(idx)
+      return {
+        get messages() {
+          return entry.messages.slice()
+        },
+        nextMessage(): Promise<unknown> {
+          if (entry.messages.length > 0) return Promise.resolve(entry.messages.shift())
+          return new Promise<unknown>((resolve) => entry.queue.push(resolve))
+        },
+      }
     },
     close(): Promise<void> {
       return new Promise<void>((resolve) => {
@@ -100,11 +137,17 @@ async function startUpstreamMock(
   }
 }
 
-async function startApp(opts: { upstreamWsUrl: string }): Promise<AppHandle> {
+async function startApp(opts: {
+  upstreamWsUrl: string
+  idleTimeoutMs?: number
+  gracePeriodMs?: number
+}): Promise<AppHandle> {
   const app = buildServer({
     logger: false,
     config: TEST_CONFIG,
     upstreamWsUrl: opts.upstreamWsUrl,
+    ...(opts.idleTimeoutMs !== undefined ? { realtimeWsIdleTimeoutMs: opts.idleTimeoutMs } : {}),
+    ...(opts.gracePeriodMs !== undefined ? { realtimeWsGracePeriodMs: opts.gracePeriodMs } : {}),
   })
   await app.listen({ port: 0, host: '127.0.0.1' })
   const addr = app.server.address() as AddressInfo
@@ -120,7 +163,8 @@ interface ClientEvents {
   messages: unknown[]
   closes: Array<{ code: number; reason: string }>
   errors: Error[]
-  /** Wait for the next message. Resolves with the parsed JSON or rejects on close. */
+  /** Wait for the next message. Resolves with the parsed JSON. Will hang
+   * until a message arrives — callers that race against close should `Promise.race`. */
   nextMessage(): Promise<unknown>
   /** Wait for the WS to close. */
   closed(): Promise<{ code: number; reason: string }>
@@ -295,14 +339,11 @@ describe('happy path', () => {
   })
 
   it('forwards client audio as upstream session.input_audio_buffer.append (T0.1 prefix)', async () => {
-    const audioPayloads: unknown[] = []
     upstream = await startUpstreamMock((socket, msg) => {
       const m = msg as { type?: string }
       if (m.type === 'session.update') {
         socket.send(JSON.stringify({ type: 'session.created', session: { id: 's1' } }))
-        return
       }
-      if (m.type === 'session.input_audio_buffer.append') audioPayloads.push(msg)
     })
     app = await startApp({ upstreamWsUrl: upstream.url })
 
@@ -314,13 +355,15 @@ describe('happy path', () => {
     client.send(JSON.stringify({ type: 'audio', pcm: 'AAEC' }))
     client.send(JSON.stringify({ type: 'audio', pcm: 'AwQF' }))
 
-    // Give the relay a tick to forward.
-    await new Promise<void>((resolve) => setTimeout(resolve, 50))
-
-    expect(audioPayloads).toEqual([
-      { type: 'session.input_audio_buffer.append', audio: 'AAEC' },
-      { type: 'session.input_audio_buffer.append', audio: 'AwQF' },
-    ])
+    // Event-driven wait: pop messages off the upstream socket capture in
+    // order. First message was session.update from `open`; next two are
+    // the audio frames we just sent.
+    const upstreamCapture = upstream.capture(0)
+    await upstreamCapture.nextMessage() // skip session.update
+    const audio1 = await upstreamCapture.nextMessage()
+    const audio2 = await upstreamCapture.nextMessage()
+    expect(audio1).toEqual({ type: 'session.input_audio_buffer.append', audio: 'AAEC' })
+    expect(audio2).toEqual({ type: 'session.input_audio_buffer.append', audio: 'AwQF' })
 
     client.close()
   })
@@ -375,35 +418,6 @@ describe('happy path', () => {
   })
 
   it('forwards `language` as a session.update with the new target', async () => {
-    const upstreamMsgs: unknown[] = []
-    upstream = await startUpstreamMock((socket, msg) => {
-      upstreamMsgs.push(msg)
-      const m = msg as { type?: string }
-      if (m.type === 'session.update' && upstreamMsgs.length === 1) {
-        socket.send(JSON.stringify({ type: 'session.created', session: { id: 's1' } }))
-      }
-    })
-    app = await startApp({ upstreamWsUrl: upstream.url })
-
-    const client = await openClient(app.port)
-    const events = attachClient(client)
-    client.send(JSON.stringify({ type: 'open', targetLanguage: 'ja' }))
-    await events.nextMessage()
-
-    client.send(JSON.stringify({ type: 'language', target: 'en' }))
-    await new Promise<void>((resolve) => setTimeout(resolve, 50))
-
-    expect(upstreamMsgs[1]).toEqual({
-      type: 'session.update',
-      session: { audio: { output: { language: 'en' } } },
-    })
-
-    client.close()
-  })
-})
-
-describe('graceful close with trailing-deltas grace period', () => {
-  it('sends session.close upstream and holds the connection open for the grace period', async () => {
     upstream = await startUpstreamMock((socket, msg) => {
       const m = msg as { type?: string }
       if (m.type === 'session.update') {
@@ -412,43 +426,164 @@ describe('graceful close with trailing-deltas grace period', () => {
     })
     app = await startApp({ upstreamWsUrl: upstream.url })
 
-    // Sanity: the production grace period is 6 seconds — guard against
-    // accidentally shrinking it.
+    const client = await openClient(app.port)
+    const events = attachClient(client)
+    client.send(JSON.stringify({ type: 'open', targetLanguage: 'ja' }))
+    await events.nextMessage()
+
+    const upstreamCapture = upstream.capture(0)
+    await upstreamCapture.nextMessage() // initial session.update
+
+    client.send(JSON.stringify({ type: 'language', target: 'en' }))
+    const secondUpdate = await upstreamCapture.nextMessage()
+    expect(secondUpdate).toEqual({
+      type: 'session.update',
+      session: { audio: { output: { language: 'en' } } },
+    })
+
+    client.close()
+  })
+})
+
+describe('open / close races (Codex review B-1 / B-2)', () => {
+  it('does not create a second upstream connection when `open` is sent twice', async () => {
+    upstream = await startUpstreamMock((socket, msg) => {
+      const m = msg as { type?: string }
+      if (m.type === 'session.update') {
+        socket.send(JSON.stringify({ type: 'session.created', session: { id: 's1' } }))
+      }
+    })
+    app = await startApp({ upstreamWsUrl: upstream.url })
+
+    const client = await openClient(app.port)
+    const events = attachClient(client)
+    // Two `open` frames back-to-back, before any await can resolve.
+    client.send(JSON.stringify({ type: 'open', targetLanguage: 'ja' }))
+    client.send(JSON.stringify({ type: 'open', targetLanguage: 'en' }))
+
+    const first = (await events.nextMessage()) as { type: string }
+    const second = (await events.nextMessage()) as { type: string; code?: string }
+
+    // Expect exactly one of the responses to be session.created and the
+    // other to be the "open already received" rejection. The order depends
+    // on whether the state lock or the hash await wins; both interleavings
+    // are valid as long as only one upstream connection materialised.
+    const types = [first.type, second.type].sort()
+    expect(types).toEqual(['error', 'session.created'])
+
+    // Give a tick for any racing upstream connect to land; we want a hard
+    // upper bound of 1 connection.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+    expect(upstream.sockets.length).toBe(1)
+
+    client.close()
+  })
+
+  it('does not connect upstream if `close` arrives while `open` is awaiting the safety-id hash', async () => {
+    // Send `open` and `close` immediately one after the other. The relay's
+    // state machine should observe `close` and skip the connectUpstream call.
+    upstream = await startUpstreamMock()
+    app = await startApp({ upstreamWsUrl: upstream.url })
+
+    const client = await openClient(app.port)
+    client.send(JSON.stringify({ type: 'open', targetLanguage: 'ja' }))
+    client.send(JSON.stringify({ type: 'close' }))
+
+    // 200 ms is plenty for the hash to complete (a few hundred μs) and for
+    // any erroneous connectUpstream to land on the mock.
+    await new Promise<void>((resolve) => setTimeout(resolve, 200))
+    expect(upstream.sockets.length).toBe(0)
+
+    client.close()
+  })
+})
+
+describe('idle timeout', () => {
+  it('emits idle_timeout and closes the socket after the configured idle window', async () => {
+    upstream = await startUpstreamMock()
+    app = await startApp({
+      upstreamWsUrl: upstream.url,
+      idleTimeoutMs: 150,
+      gracePeriodMs: 200,
+    })
+
+    const client = await openClient(app.port)
+    const events = attachClient(client)
+    // No client message → idle timer must fire.
+    const msg = (await events.nextMessage()) as { type: string; code: string }
+    expect(msg.type).toBe('error')
+    expect(msg.code).toBe('idle_timeout')
+
+    const closed = await events.closed()
+    expect(closed.code).toBeGreaterThanOrEqual(1000)
+  })
+})
+
+describe('upstream close while live', () => {
+  it('emits upstream_closed and tears down when OpenAI closes mid-session', async () => {
+    upstream = await startUpstreamMock((socket, msg) => {
+      const m = msg as { type?: string }
+      if (m.type === 'session.update') {
+        socket.send(JSON.stringify({ type: 'session.created', session: { id: 's1' } }))
+        // Immediately close upstream to simulate OpenAI dropping the session.
+        setTimeout(() => {
+          socket.close(1011, 'upstream went away')
+        }, 30)
+      }
+    })
+    app = await startApp({ upstreamWsUrl: upstream.url })
+
+    const client = await openClient(app.port)
+    const events = attachClient(client)
+    client.send(JSON.stringify({ type: 'open', targetLanguage: 'ja' }))
+
+    await events.nextMessage() // session.created
+    const errMsg = (await events.nextMessage()) as { type: string; code: string }
+    expect(errMsg.type).toBe('error')
+    expect(errMsg.code).toBe('upstream_closed')
+  })
+})
+
+describe('graceful close with trailing-deltas grace period', () => {
+  it('production GRACE_PERIOD_MS is at least 6 s (T0.1 finding §10.3)', () => {
+    // Sanity: guard against accidentally shrinking the grace period and
+    // losing the tail of every translation.
     expect(GRACE_PERIOD_MS).toBeGreaterThanOrEqual(6000)
+  })
+
+  it('sends session.close upstream and holds the upstream open during the grace period', async () => {
+    upstream = await startUpstreamMock((socket, msg) => {
+      const m = msg as { type?: string }
+      if (m.type === 'session.update') {
+        socket.send(JSON.stringify({ type: 'session.created', session: { id: 's1' } }))
+      }
+    })
+    // Short grace period so the test asserts behaviour rather than burning
+    // a 6 s wall clock. Production uses 6000 ms (guarded above).
+    app = await startApp({ upstreamWsUrl: upstream.url, gracePeriodMs: 300 })
 
     const client = await openClient(app.port)
     const events = attachClient(client)
     client.send(JSON.stringify({ type: 'open', targetLanguage: 'ja' }))
     await events.nextMessage()
 
-    // Capture the upstream session.close once the relay forwards it.
     const upstreamSocket = upstream.sockets[0]!
-    const upstreamMsgs: unknown[] = []
-    upstreamSocket.on('message', (raw: RawData) => {
-      const text = Buffer.isBuffer(raw)
-        ? raw.toString('utf-8')
-        : raw instanceof ArrayBuffer
-          ? Buffer.from(raw).toString('utf-8')
-          : Buffer.concat(raw).toString('utf-8')
-      try {
-        upstreamMsgs.push(JSON.parse(text))
-      } catch {
-        /* ignore */
-      }
-    })
+    const upstreamCapture = upstream.capture(0)
+    await upstreamCapture.nextMessage() // initial session.update
 
     client.send(JSON.stringify({ type: 'close' }))
-    // Allow forward to occur.
-    await new Promise<void>((resolve) => setTimeout(resolve, 100))
-    expect(upstreamMsgs.some((m) => (m as { type?: string }).type === 'session.close')).toBe(
-      true,
-    )
-
-    // Upstream must still be open — within the grace period.
+    const closeMsg = await upstreamCapture.nextMessage()
+    expect(closeMsg).toEqual({ type: 'session.close' })
+    // Upstream must still be open immediately after session.close forward.
     expect(upstreamSocket.readyState).toBe(upstreamSocket.OPEN)
 
+    // Wait until the grace period has elapsed; the relay must then close
+    // the upstream (we observe via close event).
+    await new Promise<void>((resolve) => upstreamSocket.once('close', () => resolve()))
+    expect(upstreamSocket.readyState).toBe(upstreamSocket.CLOSED)
+
     client.close()
-  }, 10_000)
+  })
 })
 
 describe('error normalisation', () => {
@@ -534,7 +669,7 @@ describe('client-side guards', () => {
     client.close()
   })
 
-  it('silently drops audio sent before `open`', async () => {
+  it('silently drops audio sent before `open` (no error, no upstream connection)', async () => {
     upstream = await startUpstreamMock()
     app = await startApp({ upstreamWsUrl: upstream.url })
 
@@ -542,8 +677,10 @@ describe('client-side guards', () => {
     const events = attachClient(client)
     client.send(JSON.stringify({ type: 'audio', pcm: 'AAEC' }))
 
-    // No error event should have arrived within 100 ms.
-    const dropped = await Promise.race([
+    // The relay should *not* emit anything in response to pre-open audio.
+    // We assert that by racing the next-message wait against a small timeout;
+    // a real message arrival would fail the test.
+    const outcome = await Promise.race([
       new Promise<'message'>((resolve) => {
         void events.nextMessage().then(() => {
           resolve('message')
@@ -551,8 +688,23 @@ describe('client-side guards', () => {
       }),
       new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 100)),
     ])
-    expect(dropped).toBe('timeout')
+    expect(outcome).toBe('timeout')
     expect(upstream.sockets.length).toBe(0)
+
+    client.close()
+  })
+
+  it('rejects `language` before `live` with invalid_request', async () => {
+    upstream = await startUpstreamMock()
+    app = await startApp({ upstreamWsUrl: upstream.url })
+
+    const client = await openClient(app.port)
+    const events = attachClient(client)
+    client.send(JSON.stringify({ type: 'language', target: 'en' }))
+
+    const msg = (await events.nextMessage()) as { type: string; code: string }
+    expect(msg.type).toBe('error')
+    expect(msg.code).toBe('invalid_request')
 
     client.close()
   })

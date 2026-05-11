@@ -46,7 +46,15 @@ export const IDLE_TIMEOUT_MS = 30_000
  * client. */
 export const MAX_PAYLOAD_BYTES = 64 * 1024
 
-/** Allow 2 concurrent sessions per source IP (handles iOS reconnect race). */
+/** Allow 2 concurrent sessions per source IP (handles iOS reconnect race).
+ *
+ * NOTE on proxy deployments (Codex review M-5, PR #10): when this service
+ * runs behind a reverse proxy (Cloud Run / Nginx / Tailscale Serve), every
+ * client will share the proxy's source IP and 2 concurrent users will
+ * starve the third. To use this cap as intended, set Fastify's `trustProxy`
+ * to the proxy's IP/CIDR in `buildServer` and rely on `req.ip` resolving
+ * via X-Forwarded-For. Without that change, treat this cap as a *node-level*
+ * burst limit rather than a per-user gate. */
 export const MAX_CONNECTIONS_PER_IP = 2
 
 /** If the *client* socket falls behind by >1 MB of buffered audio frames the
@@ -182,8 +190,11 @@ function runRelay(deps: RunRelayDeps): void {
   let safetyId = ''
   let closeTimer: ReturnType<typeof setTimeout> | null = null
 
-  // Idle timer: any client message or upstream event resets it. Default 30 s;
-  // ample for translation (audio chunks arrive ~every 100 ms in active use).
+  // Idle timer: any client message, upstream event, or client pong resets
+  // it. Default 30 s; ample for translation (audio chunks arrive ~every
+  // 100 ms in active use). Codex review M-1 (PR #10): periodically ping the
+  // client so a silent-but-alive client (e.g. mid-network-blip) doesn't
+  // get killed by the idle gate — `socket.on('pong')` then bumps idle.
   let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
     log.warn('WS idle timeout — closing')
     sendDownstream({ type: 'error', code: 'idle_timeout', message: 'Connection idle timeout' })
@@ -197,17 +208,31 @@ function runRelay(deps: RunRelayDeps): void {
       teardown('idle_timeout')
     }, deps.idleTimeoutMs)
   }
+  // Ping the client at half the idle interval so a healthy-but-quiet session
+  // (e.g. user paused) survives. ws auto-responds to inbound server pings on
+  // the browser side, and Node's `WebSocket` emits 'pong' on this socket.
+  const pingInterval = setInterval(() => {
+    if (socket.readyState !== socket.OPEN) return
+    try {
+      socket.ping()
+    } catch {
+      /* ignore — socket may have died between the readyState read and the ping */
+    }
+  }, Math.max(deps.idleTimeoutMs / 2, 1000))
+  socket.on('pong', () => {
+    bumpIdle()
+  })
 
   // ── downstream helpers ──────────────────────────────────────────────────
   function sendDownstream(msg: ServerWsMessage): void {
     if (socket.readyState !== socket.OPEN) return
     if (socket.bufferedAmount > CLIENT_BUFFER_LIMIT_BYTES) {
-      log.warn({ buffered: socket.bufferedAmount }, 'client back-pressure exceeded — closing')
-      try {
-        socket.close(1011, 'back-pressure')
-      } catch {
-        /* socket may already be torn down */
-      }
+      // Tear down both legs immediately so we stop billing upstream tokens
+      // for a client that cannot drain them. Closing the client socket only
+      // would leave the upstream alive until the client's `close` event
+      // bubbles back. Codex review H-3 (PR #10).
+      log.warn({ buffered: socket.bufferedAmount }, 'client back-pressure exceeded — tearing down')
+      teardown('back_pressure')
       return
     }
     try {
@@ -221,6 +246,7 @@ function runRelay(deps: RunRelayDeps): void {
     if (state === 'closed') return
     state = 'closed'
     clearTimeout(idleTimer)
+    clearInterval(pingInterval)
     if (closeTimer) {
       clearTimeout(closeTimer)
       closeTimer = null
@@ -300,7 +326,10 @@ function runRelay(deps: RunRelayDeps): void {
     })
 
     u.on('error', (err: Error) => {
-      log.warn({ err: err.name, msg: err.message }, 'upstream error')
+      // Intentionally log only the error class name. Upstream `err.message`
+      // can echo internal identifiers / token state and must not be retained
+      // in log archives. Codex review H-2 (PR #10).
+      log.warn({ err: err.name }, 'upstream error')
       sendDownstream({
         type: 'error',
         code: 'upstream_error',
@@ -309,8 +338,10 @@ function runRelay(deps: RunRelayDeps): void {
       teardown('upstream_error')
     })
 
-    u.on('close', (code: number, reason: Buffer) => {
-      log.info({ code, reason: reason.toString('utf-8') }, 'upstream closed')
+    u.on('close', (code: number) => {
+      // Same sanitisation: keep only the WS close code, drop the reason
+      // string. Codex review H-2 (PR #10).
+      log.info({ code }, 'upstream closed')
       if (state !== 'closing' && state !== 'closed') {
         sendDownstream({
           type: 'error',
@@ -410,12 +441,27 @@ function runRelay(deps: RunRelayDeps): void {
       })
       return
     }
-    void dispatchClient(parsed)
+    // `dispatchClient` is async only for `open` (await computeSafetyIdentifier).
+    // Any rejection is converted to a sanitised downstream error + teardown so
+    // a hashing failure cannot leak as an unhandled rejection that bypasses
+    // ipCounter cleanup. Codex review B/H feedback (PR #10).
+    void dispatchClient(parsed).catch((err: unknown) => {
+      log.warn(
+        { err: err instanceof Error ? err.name : 'Unknown' },
+        'client dispatch failed',
+      )
+      sendDownstream({
+        type: 'error',
+        code: 'upstream_error',
+        message: 'Translation service unavailable',
+      })
+      teardown('dispatch_failed')
+    })
   })
 
   async function dispatchClient(msg: ClientWsMessage): Promise<void> {
     switch (msg.type) {
-      case 'open':
+      case 'open': {
         if (state !== 'awaiting_open') {
           sendDownstream({
             type: 'error',
@@ -424,12 +470,35 @@ function runRelay(deps: RunRelayDeps): void {
           })
           return
         }
+        // Lock state synchronously *before* the await — otherwise a concurrent
+        // second `open` (or a `close` arriving while the hash is computing)
+        // would slip past the `awaiting_open` check and create a duplicate
+        // upstream connection. Codex review B-1 / B-2 (PR #10).
+        state = 'connecting_upstream'
         // parseClientMessage already rejects 'auto', so the cast is safe.
         targetLanguage = msg.targetLanguage as TargetLanguage
         userId = resolveUserId(req)
-        safetyId = await computeSafetyIdentifier(config.safetyIdSalt, userId)
+        try {
+          safetyId = await computeSafetyIdentifier(config.safetyIdSalt, userId)
+        } catch (err) {
+          log.warn(
+            { err: err instanceof Error ? err.name : 'Unknown' },
+            'safety id computation failed',
+          )
+          sendDownstream({
+            type: 'error',
+            code: 'upstream_error',
+            message: 'Translation service unavailable',
+          })
+          teardown('safety_id_failed')
+          return
+        }
+        // If a `close` arrived while we were awaiting the hash, do not start
+        // the upstream connection.
+        if (state !== 'connecting_upstream') return
         connectUpstream(targetLanguage)
         return
+      }
 
       case 'audio':
         if (state !== 'live' || !upstream || upstream.readyState !== upstream.OPEN) {
@@ -488,12 +557,13 @@ function runRelay(deps: RunRelayDeps): void {
     }
   }
 
-  socket.on('close', (code: number, reason: Buffer) => {
-    log.info({ code, reason: reason.toString('utf-8') }, 'client socket closed')
+  socket.on('close', (code: number) => {
+    // Drop client-supplied close reason; cf. Codex review H-2 (PR #10).
+    log.info({ code }, 'client socket closed')
     teardown('client_closed')
   })
   socket.on('error', (err: Error) => {
-    log.warn({ err: err.name, msg: err.message }, 'client socket error')
+    log.warn({ err: err.name }, 'client socket error')
     teardown('client_error')
   })
 }
