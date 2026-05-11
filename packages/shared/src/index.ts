@@ -28,4 +28,5 @@ export {
 } from './language.js'
 export { breakLines, charWidth, stringWidth, truncate } from './formatting/lineBreak.js'
 export { findSegmentBoundary } from './formatting/segmentBoundary.js'
-export { computeSafetyIdentifier } from './formatting/safetyIdentifier.js'
+// `computeSafetyIdentifier` is server-only — import it from
+// `@even-rt/shared/server` to keep `node:crypto` out of browser bundles.

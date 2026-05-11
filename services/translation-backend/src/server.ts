@@ -1,11 +1,8 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
-import {
-  SUPPORTED_LANGUAGES,
-  computeSafetyIdentifier,
-  type LanguageCode,
-} from '@even-rt/shared'
+import { SUPPORTED_LANGUAGES, type LanguageCode } from '@even-rt/shared'
+import { computeSafetyIdentifier } from '@even-rt/shared/server'
 import { type Config } from './config.js'
 import {
   TRANSLATION_MODEL,

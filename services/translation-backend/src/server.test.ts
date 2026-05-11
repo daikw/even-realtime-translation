@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { computeSafetyIdentifier } from '@even-rt/shared'
+import { computeSafetyIdentifier } from '@even-rt/shared/server'
 import { buildServer, type BuildServerOptions } from './server.js'
 
 const baseOptions: BuildServerOptions = {
