@@ -11,3 +11,7 @@ coverage
 *.log
 *.tmp
 *.tsbuildinfo
+
+# Playwright MCP screenshots / snapshots from interactive smokes
+.playwright-mcp/
+apps/evenhub-app/smoke-*.png
