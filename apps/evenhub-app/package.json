@@ -1,0 +1,23 @@
+{
+  "name": "@even-rt/evenhub-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@even-rt/shared": "workspace:*",
+    "@evenrealities/even_hub_sdk": "0.0.10"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1",
+    "vite": "8.0.11"
+  }
+}
