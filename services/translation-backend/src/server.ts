@@ -10,6 +10,7 @@ import {
   mapUpstreamError,
   requestClientSecret,
 } from './openai.js'
+import { registerRealtimeWs } from './realtime-ws.js'
 import { VERSION } from './version.js'
 
 export interface BuildServerOptions {
@@ -22,6 +23,11 @@ export interface BuildServerOptions {
   config?: Config
   /** Optional fetch override for unit tests. */
   fetchImpl?: typeof fetch
+  /**
+   * When set, override the upstream OpenAI Realtime Translation WS URL. Used
+   * by `realtime-ws.test.ts` to point the relay at an in-process mock server.
+   */
+  upstreamWsUrl?: string
 }
 
 interface SessionRequestBody {
@@ -165,6 +171,14 @@ export function buildServer(opts: BuildServerOptions = {}): FastifyInstance {
     global: true,
     max: 60,
     timeWindow: '1 minute',
+  })
+
+  // Phase 2 WS relay. Registered *before* the legacy HTTP route plugin so
+  // `@fastify/websocket` is loaded into the plugin tree first (see
+  // docs/phase2-migration-plan.md §3 T2.1).
+  registerRealtimeWs(app, {
+    config,
+    ...(opts.upstreamWsUrl !== undefined ? { upstreamUrl: opts.upstreamWsUrl } : {}),
   })
 
   app.setErrorHandler((err: unknown, _req, reply) => {
