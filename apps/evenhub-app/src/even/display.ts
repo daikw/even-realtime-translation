@@ -1,5 +1,7 @@
 import {
   CreateStartUpPageContainer,
+  ListContainerProperty,
+  ListItemContainerProperty,
   StartUpPageCreateResult,
   TextContainerProperty,
   TextContainerUpgrade,
@@ -14,6 +16,15 @@ import {
  * {@link HudDisplay.setupPage}.
  */
 export const MAIN_TEXT_CONTAINER_ID = 1
+
+/**
+ * Companion list container used solely to receive `isEventCapture=1` G2/R1
+ * input events. The official SDK README requires *exactly one* container to
+ * carry the flag and consistently models it on a list. Real-device firmware
+ * returns `invalid` when the flag lives on a text container, even though the
+ * simulator (>=0.7.3) lets that pass.
+ */
+export const INPUT_LIST_CONTAINER_ID = 2
 
 const DEFAULT_INTERVAL_MS = 150
 
@@ -104,40 +115,41 @@ export class HudDisplay {
 
     this.containerId = opts.containerId
     this.setupPromise = (async () => {
+      // Subtitle: full-frame text container, no input capture.
       const text = new TextContainerProperty({
         containerID: opts.containerId,
         containerName: 'subtitle',
-        // §6.4 layout: one full-width subtitle container. Concrete pixel
-        // values are placeholders to be tuned with the device; the SDK call
-        // already exercises the wire format we care about for M0-M2.
         xPosition: 0,
         yPosition: 0,
         width: 576,
         height: 288,
-        // Default border/padding aligned with @jappyjan/even-better-sdk's
-        // pattern. Simulator >= 0.7.0 returns StartUpPageCreateResult.invalid
-        // when these are missing alongside isEventCapture, so we send them
-        // explicitly even though zero matches the firmware default.
-        borderWidth: 0,
-        borderColor: 0,
-        borderRadius: 0,
-        paddingLength: 0,
-        // Required so the host (firmware or simulator) forwards CLICK /
-        // DOUBLE_CLICK / SCROLL_TOP / SCROLL_BOTTOM events back to this
-        // container. The simulator README is explicit: "Input is only
-        // effective when the app has an active event container ... If
-        // nothing is listening, the action is silently ignored." Without
-        // this flag, `subscribeInput`'s handler never fires.
-        isEventCapture: 1,
-        // Simulator validates non-empty content for event-capturing text
-        // containers; an empty string here triggers StartUpPageCreateResult.
-        // invalid. The HUD overwrites this on the first throttle tick via
-        // upgradeText('startup screen'), so the placeholder is only visible
-        // for a few milliseconds in practice.
+        isEventCapture: 0,
         content: ' ',
       })
+
+      // Input sink: a 1×1 list container off in the top-left corner. The
+      // SDK README's canonical pattern puts isEventCapture=1 on a list
+      // container (text containers cannot legally carry the flag on real
+      // hardware — firmware returns StartUpPageCreateResult.invalid).
+      // Single dummy item is enough to satisfy the property; selection
+      // metadata is ignored because we only consume eventType.
+      const inputSink = new ListContainerProperty({
+        containerID: INPUT_LIST_CONTAINER_ID,
+        containerName: 'input',
+        xPosition: 0,
+        yPosition: 0,
+        width: 1,
+        height: 1,
+        isEventCapture: 1,
+        itemContainer: new ListItemContainerProperty({
+          itemCount: 1,
+          itemName: [' '],
+        }),
+      })
+
       const container = new CreateStartUpPageContainer({
-        containerTotalNum: 1,
+        containerTotalNum: 2,
+        listObject: [inputSink],
         textObject: [text],
       })
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   EventSourceType,
+  List_ItemEvent,
   OsEventTypeList,
   Sys_ItemEvent,
   Text_ItemEvent,
@@ -190,7 +191,28 @@ describe('subscribeInput', () => {
     expect(handler.mock.calls[0]?.[0].kind).toBe('unknown')
   })
 
-  it('ignores audioEvent / listEvent and other non-input payloads', () => {
+  it('maps listEvent.eventType via mapEventType (real-device input path)', () => {
+    // SDK README places isEventCapture=1 on a list container; real firmware
+    // delivers CLICK / DOUBLE_CLICK / SCROLL_* through listEvent. The earlier
+    // text-container layout never reached production hardware because the
+    // host rejected createStartUpPageContainer with StartUpPageCreateResult.
+    // invalid.
+    const { bridge, emit } = makeBridge()
+    const handler = vi.fn<(e: AppInputEvent) => void>()
+    subscribeInput(asBridge(bridge), handler)
+
+    emit({
+      listEvent: new List_ItemEvent({
+        containerID: 2,
+        containerName: 'input',
+        eventType: OsEventTypeList.CLICK_EVENT,
+      }),
+    })
+
+    expect(handler.mock.calls[0]?.[0].kind).toBe('singlePress')
+  })
+
+  it('ignores audioEvent and other non-input payloads', () => {
     const { bridge, emit } = makeBridge()
     const handler = vi.fn<(e: AppInputEvent) => void>()
     subscribeInput(asBridge(bridge), handler)

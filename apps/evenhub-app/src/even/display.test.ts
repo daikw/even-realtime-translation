@@ -37,18 +37,24 @@ describe('HudDisplay.setupPage', () => {
     expect(arg).toBeInstanceOf(CreateStartUpPageContainer)
   })
 
-  it('marks the text container with isEventCapture=1 so input events arrive', async () => {
-    // Without this flag the firmware / simulator silently drop CLICK and swipe
-    // input — regression guard for the M2 smoke fix.
+  it('puts isEventCapture=1 on a list container (not text) so real firmware accepts the layout', async () => {
+    // The SDK README requires exactly one container to carry the flag and
+    // shows it on a list. Real-device firmware returned
+    // StartUpPageCreateResult.invalid when the flag lived on the text
+    // container, even though simulator >=0.7.3 accepted that variant.
     const bridge = makeBridge()
     const display = new HudDisplay(asBridge(bridge))
 
     await display.setupPage({ containerId: MAIN_TEXT_CONTAINER_ID })
 
     const arg = bridge.createStartUpPageContainer.mock.calls[0]?.[0] as {
+      containerTotalNum?: number
+      listObject?: Array<{ isEventCapture?: number }>
       textObject?: Array<{ isEventCapture?: number }>
     }
-    expect(arg.textObject?.[0]?.isEventCapture).toBe(1)
+    expect(arg.containerTotalNum).toBe(2)
+    expect(arg.listObject?.[0]?.isEventCapture).toBe(1)
+    expect(arg.textObject?.[0]?.isEventCapture).toBe(0)
   })
 
   it('is idempotent: calling setupPage twice still creates only once', async () => {

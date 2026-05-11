@@ -3,6 +3,7 @@ import {
   OsEventTypeList,
   type EvenAppBridge,
   type EvenHubEvent,
+  type List_ItemEvent,
   type Sys_ItemEvent,
   type Text_ItemEvent,
 } from '@evenrealities/even_hub_sdk'
@@ -70,18 +71,27 @@ function isTouchEventSource(source: EventSourceType | undefined): boolean {
 /**
  * Resolve the input kind from an EvenHubEvent.
  *
- * - `textEvent`: the event came from an `isEventCapture` text container.
- *   `eventType` is reliably present and maps via `mapEventType`.
+ * - `listEvent`: the canonical path on real hardware. The SDK README puts
+ *   `isEventCapture=1` on a list container, so CLICK / DOUBLE_CLICK /
+ *   SCROLL_TOP / SCROLL_BOTTOM all arrive here with `eventType` set.
+ * - `textEvent`: the simulator (>=0.7.3) also surfaces events on text
+ *   containers carrying `isEventCapture=1`. Real firmware rejects that
+ *   layout but we keep the branch so the simulator stays diagnosable.
  * - `sysEvent`: touch events from the glasses/ring (and lifecycle/IMU).
- *   The official simulator (>=0.7.3) and at least some firmware builds
- *   *omit* `eventType` when it equals 0 (`CLICK_EVENT`) because the proto
- *   JSON serializer drops fields that match the enum default. So when
- *   `sysEvent.eventType` is undefined AND `eventSource` indicates a touch
- *   path, we infer `CLICK_EVENT` rather than silently dropping the input.
- *   Lifecycle / IMU sys events are intentionally dropped here (they have no
- *   touch eventSource) and surfaced via `subscribeLifecycle` instead.
+ *   The simulator *omits* `eventType` when it equals 0 (`CLICK_EVENT`)
+ *   because the proto JSON serializer drops fields that match the enum
+ *   default. When `sysEvent.eventType` is undefined AND `eventSource`
+ *   indicates a touch path, we infer `CLICK_EVENT` rather than silently
+ *   dropping the input. Lifecycle / IMU sys events are intentionally
+ *   dropped here (no touch eventSource) and surfaced via
+ *   `subscribeLifecycle` instead.
  */
 function resolveKind(event: EvenHubEvent): AppInputEventKind | null {
+  const list: List_ItemEvent | undefined = event.listEvent
+  if (list !== undefined) {
+    return mapEventType(list.eventType)
+  }
+
   const sys: Sys_ItemEvent | undefined = event.sysEvent
   if (sys !== undefined) {
     if (sys.eventType === undefined) {
