@@ -51,15 +51,21 @@ services/translation-backend
         │   OpenAI-Safety-Identifier: <sha256(salt + userId)>
         │
         ├─ relay client→OpenAI:
-        │     session.update                   (target language)
-        │     input_audio_buffer.append        (base64 PCM16 24 kHz, continuous)
+        │     session.update                          (target language, transcription model, noise_reduction)
+        │     session.input_audio_buffer.append       (base64 PCM16 24 kHz, continuous)
+        │     session.close                           (graceful shutdown; WS still has trailing events to flush)
         │     NO input_audio_buffer.commit / response.create — translation
         │     sessions stream output without those turn-lifecycle calls.
+        │     IMPORTANT: client→server event types are all `session.` prefixed
+        │     (T0.1 finding 2026-05-11, §10.3). Unprefixed names are rejected
+        │     with "Invalid value … Supported values are: 'session.update',
+        │     'session.input_audio_buffer.append', and 'session.close'."
         └─ relay OpenAI→client:
-              session.output_transcript.delta  → frontend transcript.delta
-              session.input_transcript.delta   → frontend transcript.delta
-              session.output_audio.delta       (variable-length base64 PCM16 24 kHz)
-              error                            → frontend error
+              session.created / session.updated → backend logs metadata; first frame triggers `{type:'session.created'}` to client
+              session.output_transcript.delta  → frontend transcript.delta (source='output')
+              session.input_transcript.delta   → frontend transcript.delta (source='input')
+              session.output_audio.delta       (observed 19200 bytes / 400 ms fixed frames; treat as variable-length to stay forward-compatible)
+              error                            → frontend error (normalised to {code, message})
 ```
 
 ### 2.2 What stays the same
@@ -89,15 +95,18 @@ services/translation-backend
 
 ### Step 0 — Spike (Day 0)
 
-- **T0.1**: OpenAI Realtime Translation WebSocket を Node CLI から smoke する (commit しない script)。
+- **T0.1**: OpenAI Realtime Translation WebSocket を Node CLI から smoke する (commit しない script)。**実行済 (2026-05-11)、結果は §10.3 と Issue #6 参照**。
   - URL: `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate`
   - Headers: `Authorization: Bearer ${OPENAI_API_KEY}`, `OpenAI-Safety-Identifier: <hash>`
-  - 流す event: `session.update` で `audio.output.language` を設定 → `input_audio_buffer.append` を **base64 PCM16 24 kHz mono** で連続送信。**`commit` / `response.create` は使わない** (Translation session は continuous、turn-lifecycle 不要)。
-  - 受け取る event: `session.output_transcript.delta` / `session.input_transcript.delta` / `session.output_audio.delta` / `error`。
-  - 確認したいこと:
-    - 24 kHz 必須を実機で再確認 (16 kHz 投げて拒否されるか / 自動 resample されるか)
-    - `output_audio.delta` の frame 長 (200 ms 固定か可変か)
-    - `audioEvent.audioPcm` の chunk size (BxNxM/even-dev は 100 ms = 3200 bytes を主張、SDK type 上は固定保証なし)
+  - 流す event: `session.update` で `audio.input.transcription.model` + `audio.output.language` + `audio.input.noise_reduction` を設定 → **`session.input_audio_buffer.append`** を **base64 PCM16 24 kHz mono** で連続送信。最後に **`session.close`** で graceful shutdown。**`commit` / `response.create` は使わない** (Translation session は continuous、turn-lifecycle 不要)。
+  - 受け取る event: `session.created` / `session.updated` / `session.output_transcript.delta` / `session.input_transcript.delta` / `session.output_audio.delta` / `error`。
+  - 確定 (T0.1 実行 2026-05-11):
+    - 24 kHz PCM16 mono は正常動作。16 kHz 経路は未検証 (resampler は frontend で実施するので不要)
+    - `session.output_audio.delta` の frame サイズは **19200 bytes 固定** (= 9600 samples = 400 ms @ 24kHz mono) を観測。1 セッション 21 frame 全て同サイズ。**実装は可変長対応のまま**（API 仕様で固定保証は未確認、forward-compat 確保）。
+    - First `session.output_audio.delta` レイテンシ: WS open から **+2211ms** (うち session.update→updated +250ms、audio chunk 開始から +500ms 程度) — Issue #3 ベースライン
+    - First `session.*_transcript.delta` レイテンシ: WS open から **+2321ms**
+    - トレーリング deltas は audio flush 完了から ~5s 後まで継続。stop 実装は **grace period (推奨 6s 以上)** が必要。
+    - `audioEvent.audioPcm` の chunk size は実機検証で確認 (本 spike は 100 ms = 9600 bytes @ 24kHz で smoke 済み、実機は 16 kHz 入力で 3200 bytes/100ms 想定)
 - **T0.2**: stateful な mock bridge を作る (`apps/evenhub-app/src/even/bridge.mock.ts` を拡張)
   - `audioControl(true/false)` の状態を保持し、`emitAudio(chunk: Uint8Array)` ヘルパーを expose
   - stop 後の emit は無視 (bridgeMic がきちんと off になっているか検証可能に)
@@ -156,10 +165,12 @@ services/translation-backend
     ```
     `near_field` は phone 持ち想定。G2 のディスプレイ越し / 遠距離 mic にする場合は `far_field` も検討。
   - 双方向 relay (turn lifecycle 無し、continuous):
-    - client `{type:'audio', pcm}` → OpenAI `{type:'input_audio_buffer.append', audio: <base64>}` をそのまま forward (resample は frontend 側で済ませている前提)
+    - client `{type:'audio', pcm}` → OpenAI `{type:'session.input_audio_buffer.append', audio: <base64>}` をそのまま forward (resample は frontend 側で済ませている前提)。**T0.1 finding: OpenAI 側 client→server event は `session.` prefix 必須 (§10.3)**
+    - client `{type:'close'}` → OpenAI `{type:'session.close'}` (graceful)。backend は OpenAI から trailing event を受け取り続けるため、`session.close` 送信直後に upstream を tear down しない。**grace period 6 秒** (T0.1 観測) で trailing deltas を flush してから upstream close。
+    - OpenAI `session.created` / `session.updated` → backend で metadata 抽出、初回 `session.updated` または `session.created` を **frontend `{type:'session.created', meta:{...}}`** に変換して送る (T1.2 protocol 通り)
     - OpenAI `session.output_transcript.delta` → client `{type:'transcript.delta', source:'output', text}`
     - OpenAI `session.input_transcript.delta` → client `{type:'transcript.delta', source:'input', text}`
-    - OpenAI `session.output_audio.delta` → client `{type:'audio.delta', pcm: <base64>}` (可変長前提)
+    - OpenAI `session.output_audio.delta` → client `{type:'audio.delta', pcm: <base64>}` (T0.1 観測: 19200 bytes / 400 ms 固定だが、可変対応を維持)
     - OpenAI `error` → client `{type:'error', ...}` (生 message ではなく `{code, message}` に正規化、API key 漏洩を防ぐ)
   - 接続切断時に OpenAI 側もクローズ。backend が先に切れた場合は client にも close frame を送る。
   - back-pressure: client→OpenAI 方向は本質的に buffer 不要 (mic 流量は固定)。OpenAI→client 方向は client が遅い場合 ws.bufferedAmount を観測し、閾値超で client を切断する。
@@ -357,12 +368,13 @@ Phase 2 移行が失敗 (= 実機で別の blocker が出た / Discord で getUs
 
 > Codex レビュー (BLOCKING / HIGH) で確定した事項は本文に取り込み済み。残る未確認は以下:
 
-1. ~~OpenAI WS endpoint~~ → **確定**: `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate`
+1. ~~OpenAI WS endpoint~~ → **確定**: `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate` (T0.1 実走で 200 ok 確認済 §10.3)
 2. ~~audio sample rate~~ → **確定**: 24 kHz PCM16 base64 mono。frontend で必ず resample。
-3. backend が `session.update` を送る前に `input_audio_buffer.append` を流せるか (= 言語確定前の音声バッファリング)。T0.1 spike で確認。原則は session.update を最初に送る。
-4. `audioEvent.audioPcm` の chunk サイズが固定 (100 ms = 3200 bytes) か可変か。SDK type 上は固定保証なし。T0.1 副次で確認。
-5. `output_audio.delta` の frame 長 (200 ms 固定 / 可変 / 100 ms)。可変長前提で実装するが、典型値を T0.1 で記録しておくとレイテンシ計算に役立つ (Issue #3 と連動)。
+3. ~~`session.update` を先に送る必要があるか~~ → **確定** (T0.1 §10.3): session.update を最初に送れば、その後の `session.input_audio_buffer.append` は session.updated 受信を待たずに送ってよい (内部で順序保証)。デフォルト session の output language は `es` だった。
+4. `audioEvent.audioPcm` の chunk サイズが固定 (100 ms = 3200 bytes) か可変か。SDK type 上は固定保証なし。**実機で確認** (T0.1 spike は 24 kHz fixture のため代替不可)
+5. ~~`output_audio.delta` の frame 長~~ → **暫定確定** (T0.1 §10.3): 19200 bytes = 400 ms 固定を観測 (n=21、min=max=avg=19200)。API 仕様で固定保証は未確認、実装は可変対応のまま。
 6. `app.json` で旧 `phone-microphone` permission を **残したまま** WS 経路を動かしたとき、Even Realities App 側に warning などが出るか (Discord #7 で聞く)。
+7. **NEW** `session.close` 送信後の OpenAI 側 tear-down タイミング: trailing deltas が ~5s 続く (T0.1 観測)。**backend 側は client `close` → OpenAI `session.close` 送信後、grace period 6s 以上待ってから upstream WS を close する**。早期切断すると trailing transcript が落ちる。
 
 ## 8. Acceptance criteria
 
@@ -372,12 +384,14 @@ Phase 2 移行が失敗 (= 実機で別の blocker が出た / Discord で getUs
 - [ ] typecheck / lint / build 全 green
 - [ ] PR レビュー (security-reviewer / codex agent) で CRITICAL/HIGH 0
 
-### 8.2 OpenAI WS smoke (T0.1 spike)
-- [ ] CLI script で `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate` に接続成功
-- [ ] 初期送信した `session.update`（input.transcription / output.language）に対し `session.updated` イベント受信
-- [ ] base64 24 kHz PCM16 を `input_audio_buffer.append` で連続送信 → `session.output_transcript.delta` 受信
-- [ ] 同時に `session.input_transcript.delta` を受信できることを確認 (input transcription が configured)
-- [ ] `session.output_audio.delta` の典型 frame 長を 1 セッション中 N 件記録 → Issue #3 (latency) で活用
+### 8.2 OpenAI WS smoke (T0.1 spike) — ✅ 完了 (2026-05-11, §10.3)
+- [x] CLI script で `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate` に接続成功
+- [x] 初期送信した `session.update`（input.transcription / output.language / noise_reduction）に対し `session.updated` イベント受信
+- [x] base64 24 kHz PCM16 を **`session.input_audio_buffer.append`** (prefix 必須、§10.3) で連続送信 → `session.output_transcript.delta` 受信
+- [x] 同時に `session.input_transcript.delta` を受信できることを確認 (input transcription が configured)
+- [x] `session.output_audio.delta` の典型 frame 長を 1 セッション中 21 frame 記録: 19200 bytes 固定 (400 ms @ 24kHz)
+- [x] First audio delta: +2211 ms / first transcript delta: +2321 ms (Issue #3 ベースライン)
+- [x] `session.close` 後の trailing deltas を観測: ~5 秒継続
 
 ### 8.3 実機検証 (手動 checklist)
 - [ ] `.env`:
@@ -456,3 +470,46 @@ Codex (cross-model) レビューで指摘された BLOCKING / HIGH / MEDIUM を�
 | **M-7** | §8 受け入れ条件の手動 checklist 不足 | §8 を 4 段 (自動 / WS smoke / 実機 / docs) に分割、Tailscale Serve origin・proxy ws・OpenAI smoke 期待 event を明記 |
 
 API contract 大枠 (endpoint, Bearer auth, Safety Identifier header) は公式 docs で再確認済みで問題なし。
+
+### 10.3 T0.1 spike findings (2026-05-11)
+
+実走 (`/tmp/phase2-spike/spike.mjs`、英語スピーチ 7.5 秒、`say -v Samantha` → `afconvert` で 24 kHz PCM16 mono WAV)。詳細ログは Issue #6 コメント参照。本 plan へ反映済み箇所は §2.1 / §3 T0.1 / §3 T2.2 / §7 / §8.2。
+
+#### Plan 想定と異なった点 (= 訂正済み)
+
+| # | 想定 (旧 plan) | 実 API 挙動 | 反映先 |
+|---|---|---|---|
+| **F-1** | client→server event: `input_audio_buffer.append` | **`session.input_audio_buffer.append`**。`session.` prefix 必須。エラー: `"Invalid value: 'inp...end'. Supported values are: 'session.update', 'session.input_audio_buffer.append', and 'session.close'."` | §2.1, §3 T0.1, §3 T2.2 |
+| **F-2** | client→server で WS frame close するだけで OK | **`session.close`** を送るのが正式 (graceful)。送信後も trailing deltas が ~5s 続く | §2.1, §3 T0.1, §3 T2.2 (grace period 6s)、§7 q7 NEW |
+| **F-3** | `output_audio.delta` は可変長 | 観測上は **19200 bytes / 400 ms 固定** (n=21 frame、全て同サイズ)。実装は forward-compat のため可変対応を維持 | §2.1, §7 q5, §8.2 |
+| **F-4** | session.update を送らないと音声が処理されないかも | session.update 直後に audio chunk を流して問題なし。session.updated 受信を待つ必要なし。デフォルト session の language は `es` だった | §7 q3 |
+
+#### Plan 通りだった点 (確認のため記録)
+
+- URL: `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate` ✓
+- Auth: `Authorization: Bearer <api-key>` + `OpenAI-Safety-Identifier: <sha256>` ヘッダ ✓
+- `session.update` payload (audio.input.transcription.model / audio.input.noise_reduction / audio.output.language) ✓
+- `commit` / `response.create` 不要 ✓
+- Server→client event 名 (session.created / session.updated / session.input_transcript.delta / session.output_transcript.delta / session.output_audio.delta / error) ✓
+- 24 kHz PCM16 mono 入力 ✓
+
+#### Latency baseline (Issue #3 連動)
+
+WS open を t=0 として:
+
+- session.update 送信: +0 ms (open 直後)
+- session.created 受信: +17 ms
+- session.updated 受信: +243 ms
+- 最初の audio chunk 送信: +102 ms (session.updated より先)
+- **first session.output_audio.delta**: +620 ms (audio 送信開始から)、WS open から **+2211 ms**
+- **first session.*_transcript.delta**: +730 ms (audio 送信開始から)、WS open から **+2321 ms**
+- audio flush 完了から trailing input_transcript.delta 終端まで: ~5.3 秒
+- audio flush 完了から trailing output_transcript.delta 終端まで: ~6.5 秒
+
+→ T2.2 の close 実装は **`session.close` 送信 → upstream close まで 6 秒以上の grace period** を持つ。早期切断すると後半の翻訳が落ちる。
+
+#### Smoke 実行 artefact
+
+- `/tmp/phase2-spike/spike.mjs` (commit せず)
+- `/tmp/phase2-spike/sample-24k.wav` (`say -v Samantha` + `afconvert -f WAVE -d LEI16@24000 -c 1`)
+- `/tmp/phase2-spike/spike2.log` (正常 run の full log)
