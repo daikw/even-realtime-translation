@@ -28,5 +28,6 @@ export {
 } from './language.js'
 export { breakLines, charWidth, stringWidth, truncate } from './formatting/lineBreak.js'
 export { findSegmentBoundary } from './formatting/segmentBoundary.js'
+export { bytesToSamplesLE, resample16to24, samplesToBytesLE } from './audio/pcm.js'
 // `computeSafetyIdentifier` is server-only — import it from
 // `@even-rt/shared/server` to keep `node:crypto` out of browser bundles.
