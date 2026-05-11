@@ -106,6 +106,7 @@ export class HudDisplay {
     this.setupPromise = (async () => {
       const text = new TextContainerProperty({
         containerID: opts.containerId,
+        containerName: 'subtitle',
         // §6.4 layout: one full-width subtitle container. Concrete pixel
         // values are placeholders to be tuned with the device; the SDK call
         // already exercises the wire format we care about for M0-M2.
@@ -113,6 +114,14 @@ export class HudDisplay {
         yPosition: 0,
         width: 576,
         height: 288,
+        // Default border/padding aligned with @jappyjan/even-better-sdk's
+        // pattern. Simulator >= 0.7.0 returns StartUpPageCreateResult.invalid
+        // when these are missing alongside isEventCapture, so we send them
+        // explicitly even though zero matches the firmware default.
+        borderWidth: 0,
+        borderColor: 0,
+        borderRadius: 0,
+        paddingLength: 0,
         // Required so the host (firmware or simulator) forwards CLICK /
         // DOUBLE_CLICK / SCROLL_TOP / SCROLL_BOTTOM events back to this
         // container. The simulator README is explicit: "Input is only
@@ -120,7 +129,12 @@ export class HudDisplay {
         // nothing is listening, the action is silently ignored." Without
         // this flag, `subscribeInput`'s handler never fires.
         isEventCapture: 1,
-        content: '',
+        // Simulator validates non-empty content for event-capturing text
+        // containers; an empty string here triggers StartUpPageCreateResult.
+        // invalid. The HUD overwrites this on the first throttle tick via
+        // upgradeText('startup screen'), so the placeholder is only visible
+        // for a few milliseconds in practice.
+        content: ' ',
       })
       const container = new CreateStartUpPageContainer({
         containerTotalNum: 1,
