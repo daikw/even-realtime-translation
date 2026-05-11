@@ -267,12 +267,19 @@ export class App {
   }
 
   private async acquireBridge(): Promise<EvenAppBridge> {
+    // In mock mode we skip the real bridge entirely. The SDK auto-initialises
+    // `window.EvenAppBridge` in browsers, which would make `waitForEvenAppBridge`
+    // resolve even when no Flutter host is attached — and host calls would then
+    // fail with opaque errors like "createStartUpPageContainer failed: invalid".
+    if (this.cfg.useMockBridge) {
+      this.deps.log('Using mock bridge (PUBLIC_USE_MOCK_BRIDGE=true)')
+      return this.deps.mockBridgeFactory()
+    }
     try {
       return await this.deps.bridgeFactory()
     } catch (err) {
-      if (this.cfg.useMockBridge && err instanceof EvenBridgeInitError) {
-        this.deps.log('Falling back to mock bridge:', err.reason)
-        return this.deps.mockBridgeFactory()
+      if (err instanceof EvenBridgeInitError) {
+        this.deps.log('Bridge init failed:', err.reason)
       }
       throw err
     }
