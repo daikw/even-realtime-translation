@@ -35,7 +35,8 @@ EvenAppBridge.audioControl(true)
   ▼
 WebView (apps/evenhub-app)
   ├─ src/audio/bridgeMic.ts           ← NEW: pulls audioEvent chunks
-  ├─ src/audio/pcmResampler.ts        ← NEW: 16 kHz → 24 kHz S16LE PCM (required, not optional)
+  ├─ (resampler は packages/shared/src/audio/pcm.ts に集約。
+  │   apps 側は import only。docs:38 / docs:82 の表記揺れ解消)
   └─ src/realtime/websocketTranslationClient.ts  ← NEW
         │  WebSocket: wss://<vite-host>/api/realtime/ws   (same-origin via Vite proxy)
         ▼
@@ -79,7 +80,7 @@ services/translation-backend
 | `apps/evenhub-app/src/realtime/webrtcTranslationClient.ts` | `apps/evenhub-app/src/realtime/websocketTranslationClient.ts` |
 | `apps/evenhub-app/src/realtime/sdp.ts` | (削除 — WebSocket では SDP exchange なし) |
 | `apps/evenhub-app/src/audio/audioPlayer.ts` (MediaStreamTrack → `<audio>`) | `audioOutputBuffer.ts` (base64 PCM16 → AudioBufferSourceNode、optional) |
-| (なし) | `apps/evenhub-app/src/audio/pcmResampler.ts` |
+| (なし) | `packages/shared/src/audio/pcm.ts` (resampler / S16LE helpers — pure func を shared に集約) |
 | (なし) | backend WS relay (`services/translation-backend/src/realtime-ws.ts`) |
 
 ## 3. Task breakdown
@@ -138,7 +139,22 @@ services/translation-backend
   - OpenAI Realtime Translation **WebSocket** (`wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate`) に **`Authorization: Bearer ${OPENAI_API_KEY}`** で接続
     - **重要**: backend が WS upstream を保持する場合は server-side API key を直接使う。`requestClientSecret` で発行する short-lived ephemeral token は browser/WebRTC 経路向け。WS server-to-server で使うと expiry race のリスクがある。
     - `OpenAI-Safety-Identifier` ヘッダで salted hash を送る
-  - 初期送信: `{ type: 'session.update', session: { audio: { output: { language: targetLanguage } } } }`
+  - 初期送信 (session.update): source-language transcript も backend → client にリレーするので、`audio.input.transcription.model` を **明示的に** 指定する必要がある (公式 Live Translation guide)。
+    ```ts
+    {
+      type: 'session.update',
+      session: {
+        audio: {
+          input: {
+            transcription: { model: 'gpt-realtime-whisper' },
+            noise_reduction: { type: 'near_field' },
+          },
+          output: { language: targetLanguage },
+        },
+      },
+    }
+    ```
+    `near_field` は phone 持ち想定。G2 のディスプレイ越し / 遠距離 mic にする場合は `far_field` も検討。
   - 双方向 relay (turn lifecycle 無し、continuous):
     - client `{type:'audio', pcm}` → OpenAI `{type:'input_audio_buffer.append', audio: <base64>}` をそのまま forward (resample は frontend 側で済ませている前提)
     - OpenAI `session.output_transcript.delta` → client `{type:'transcript.delta', source:'output', text}`
@@ -203,17 +219,53 @@ services/translation-backend
   - WebSocket を mock (jsdom 用に薄い fake WS) して happy path / disconnect / error
   - resampler を渡さないパスもテスト
 
-### Step 5 — App glue / config
+### Step 5 — App glue / config (transport を DI 境界として一本化)
 
-- **T5.1**: `apps/evenhub-app/src/app.ts`
-  - `acquireMic` → `acquireBridgeMic` を呼ぶ DI 化 (既存の AppDeps は `acquireMic: () => Promise<MediaStream>`、新規は `acquireBridgeMic: (bridge) => Promise<BridgeMicHandle>`)
-  - `createRtcClient` → `createWsClient` に切替 (型は別)
-  - startSession の流れを書き換え
-- **T5.2**: `apps/evenhub-app/src/config.ts`
-  - 新規 env: `PUBLIC_REALTIME_WS_URL` (default `/api/realtime/ws` → 同一 origin)
-- **T5.3**: `apps/evenhub-app/app.json`
-  - `permissions` に `g2-microphone` を追加。`phone-microphone` は同時保持 (Discord 回答待ちで rollback 容易性のため。回答後にどちらか削る)
-- **T5.4**: 既存 app.test.ts を新 deps 形に書き換え。AppDeps の `acquireMic` → `acquireBridgeMic`、`createRtcClient` → `createWsClient`
+rollback を確実にするため、AppDeps を **transport-agnostic** な形に再設計する。実装は `transport: 'webrtc' | 'ws'` の旗で切り替えるのではなく、`createTranslationRuntime()` の一本化された factory を AppDeps に渡す。
+
+- **T5.1**: `apps/evenhub-app/src/realtime/runtime.ts` (新規) — 旧 WebRTC と新 WebSocket の共通インターフェイス
+  ```ts
+  export interface TranslationRuntime {
+    start(opts: {
+      targetLanguage: LanguageCode
+      onOutputTranscriptDelta: (d: TranscriptDelta) => void
+      onInputTranscriptDelta?: (d: TranscriptDelta) => void
+      onAudioDelta?: (samples: Int16Array) => void
+      onStateChange: (s: ConnectionStatus) => void
+      onError?: (e: Error) => void
+    }): Promise<void>
+    stop(): Promise<void>
+    sendLanguageUpdate(target: LanguageCode): void
+  }
+
+  export interface TranslationRuntimeFactory {
+    create(): TranslationRuntime
+  }
+  ```
+  実装は `createWebSocketRuntime()` と `createWebRtcRuntime()` (legacy) の 2 系統。
+- **T5.2**: `apps/evenhub-app/src/app.ts` の AppDeps を書き換え
+  - 旧 `acquireMic: () => Promise<MediaStream>` / `createRtcClient: (opts) => ...` を撤去
+  - 新 `translationRuntime: TranslationRuntimeFactory` 1 つに集約 (mic 取得は runtime 側の責務に内包)
+  - rollback 時は `translationRuntime = createWebRtcRuntimeFactory()` に差し替えるだけで戻る (acquireMic の MediaStream 前提も消える)
+- **T5.3**: `apps/evenhub-app/src/config.ts`
+  - 新規 env: `PUBLIC_REALTIME_WS_URL` (default `/api/realtime/ws` → 同一 origin。WS proxy 経由)
+  - 新規 env: `PUBLIC_TRANSPORT` (`'ws' | 'webrtc'`、default `'ws'`)。rollback 時に env で切替
+- **T5.4**: `apps/evenhub-app/vite.config.ts`
+  - 現行 HTTP proxy 設定に **`ws: true` を追加**して WebSocket upgrade を proxy できるようにする
+    ```ts
+    proxy: {
+      '/api': {
+        target: BACKEND_PROXY_TARGET,
+        changeOrigin: true,
+        secure: false,
+        ws: true,            // ← NEW: WebSocket upgrade を中継
+      },
+    }
+    ```
+  - これで client は同一 origin `wss://<host>/api/realtime/ws` で接続、Vite が backend に upgrade を proxy
+- **T5.5**: `apps/evenhub-app/app.json`
+  - `permissions` に `g2-microphone` を追加。`phone-microphone` は同時保持 (Discord #7 回答待ちで rollback 容易性のため。回答後にどちらか削る)
+- **T5.6**: 既存 `app.test.ts` を新 AppDeps 形に書き換え。旧 `acquireMic` / `createRtcClient` 引数は撤去、新 `translationRuntime` を mock で差し替え
 
 ### Step 6 — audio output (任意)
 
@@ -256,18 +308,27 @@ Step 7 は **deprecate-only**。実ファイル削除は §6 の rollback ゲー
 ## 4. Dependency graph
 
 ```
-T0.1 (OpenAI WS spike) ─┐
-T0.2 (mock mic helper)  ├─→ T2 (backend WS) ─┐
-T1 (shared PCM utils)   ─┘                   ├─→ T4 (frontend WS client) ─→ T5 (App glue) ─→ T7 (docs/cleanup)
-                                             │
-T3 (bridgeMic)          ──────────────────────┘
-T6 (audio output)       ──────────────────── (after T5)
+T0.1 (OpenAI WS smoke)   ──→ T2 (backend WS) ─┐
+T0.2 (stateful mock bridge) ─→ T3 (bridgeMic) ─┤
+T1.2 (shared WS protocol)   ─→ T2, T4         ─┤
+T1.1 (shared PCM utils)     ─→ T4             ─┤
+                                              ├─→ T4 (frontend WS client) ─→ T5 (App glue) ─→ T7a (docs+deprecate)
+                                              │                                              │
+                                              │                                              └─→ (rollback gate) ─→ T7b (削除)
+                                              │
+T6 (audio output)        ──────────────────── (after T5)
 ```
 
-- T1, T2, T3 は **完全並列**
-- T4 は T1, T3 完了後
-- T5 は T4 完了後
-- T7 は T5 完了後 (docs と code cleanup は最後)
+明示的依存:
+- **T0.1**: T2 着手前に OpenAI WS の生 protocol を確認 (event 名 / sample rate / commit 不要の挙動)
+- **T0.2**: T3 のテスト容易性のために先行 (mock bridge を stateful 化)
+- **T1.1 (pcm.ts)**: T4 が import (resample を frontend で実行)
+- **T1.2 (realtime-ws types)**: T2 と T4 が共有 typed protocol として使用 → 2 つを並列実装する場合は T1.2 が先
+- **T2 (backend)** と **T3 (bridgeMic)** は他に依存無し、並列可
+- **T4 (WS client)** は T1.1 + T1.2 + T3 完了後
+- **T5 (App glue)** は T4 完了後 + T2 が dev で動作可能 (integration test に必要)
+- **T7a** は Plan merge と同時に着手可、コードはまだ Step 5 完了後
+- **T7b** は §6 rollback gate (Discord 回答 + 実機 1 ラウンド成功) 通過後
 
 ## 5. Test strategy
 
@@ -286,10 +347,11 @@ T6 (audio output)       ──────────────────�
 
 Phase 2 移行が失敗 (= 実機で別の blocker が出た / Discord で getUserMedia opt-in 方法判明) した場合:
 
-1. 旧 `phoneMic.ts` / `webrtcTranslationClient.ts` / `sdp.ts` を Step 7 で削除する前は **deprecated だが動くまま**。`AppDeps` で DI を切り替えれば即戻る
-2. backend は `/api/openai/.../session` も同時保持しているので、frontend 側だけ revert すれば WebRTC 経路が復活
-3. `app.json` の `phone-microphone` も同時保持なので permission manifest の roll back 不要
-4. Step 7 (削除) は **Discord 回答 + 実機 1 ラウンド成功** の両方が満たされた後にのみ実行
+1. 旧 `phoneMic.ts` / `webrtcTranslationClient.ts` / `sdp.ts` を Step 7b で削除する前は **deprecated だが動くまま** (`@deprecated` JSDoc のみ)
+2. **AppDeps の `translationRuntime` を差し替える** だけで戻る — T5.1 で導入する `TranslationRuntimeFactory` は WS / WebRTC の 2 実装を持ち、production 切替は `PUBLIC_TRANSPORT` env のみ
+3. backend は `/api/openai/.../session` (WebRTC client secret 発行) と `GET /api/realtime/ws` を **同時保持** 。frontend 側だけ revert すれば WebRTC 経路が復活
+4. `app.json` の `phone-microphone` も同時保持なので permission manifest の roll back 不要
+5. Step 7b (物理削除) は **Discord 回答 + 実機 1 ラウンド成功** の両方が満たされた後にのみ実行
 
 ## 7. Open questions (Plan を実装に移す前に確認したい)
 
@@ -304,16 +366,43 @@ Phase 2 移行が失敗 (= 実機で別の blocker が出た / Discord で getUs
 
 ## 8. Acceptance criteria
 
-- [ ] 実機 (G2 + Phone + Tailscale Serve) で `bridge.audioControl(true)` → 翻訳字幕表示まで到達
-- [ ] backend ログに WS connect + relay 統計 (transcript delta 件数 / duration) が出る
-- [ ] **OpenAI WS smoke** (T0.1 spike script) が success 終了する
-- [ ] backend OpenAI WS smoke を `docs/test-plan.md` に手動チェックリストとして追記
+### 8.1 自動テスト
 - [ ] テスト全 pass。書き換え前の baseline (packages/shared 61 / backend 50 / app 311 — `pnpm -r test` 2026-05-11 時点) と **同等以上**。新規ファイル分は include 追加、削除ファイル分は exclude 整理。
 - [ ] coverage 80% threshold 維持
 - [ ] typecheck / lint / build 全 green
-- [ ] `docs/realtime-translation-eveng2-mvp-design.md` が新アーキテクチャと整合
 - [ ] PR レビュー (security-reviewer / codex agent) で CRITICAL/HIGH 0
-- [ ] §6 rollback ゲート条件 (Discord 回答 + 実機 1 ラウンド成功) が満たされない限り Step 7b (物理削除) は実行しない
+
+### 8.2 OpenAI WS smoke (T0.1 spike)
+- [ ] CLI script で `wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate` に接続成功
+- [ ] 初期送信した `session.update`（input.transcription / output.language）に対し `session.updated` イベント受信
+- [ ] base64 24 kHz PCM16 を `input_audio_buffer.append` で連続送信 → `session.output_transcript.delta` 受信
+- [ ] 同時に `session.input_transcript.delta` を受信できることを確認 (input transcription が configured)
+- [ ] `session.output_audio.delta` の典型 frame 長を 1 セッション中 N 件記録 → Issue #3 (latency) で活用
+
+### 8.3 実機検証 (手動 checklist)
+- [ ] `.env`:
+  - [ ] `BACKEND_HOST=127.0.0.1`、backend は loopback のみ (LAN 公開しない)
+  - [ ] `ALLOWED_ORIGINS=http://localhost:5173,https://<tailscale-fqdn>` — Tailscale Serve origin を追加 (WS preValidation で必要)
+  - [ ] `OPENAI_API_KEY` / `SAFETY_ID_SALT` が `services/translation-backend/src/config.ts` で readRequiredString に通る形
+  - [ ] `PUBLIC_REALTIME_WS_URL` 未指定 → default `/api/realtime/ws` で同一 origin
+  - [ ] `PUBLIC_TRANSPORT=ws` (default)
+- [ ] `vite.config.ts` の proxy で `'/api'` が `ws: true` 有効
+- [ ] `tailscale serve --bg https+insecure://localhost:5173` 経由で Phone から WebView load
+- [ ] G2 装着、bridge boot 成功 (startup screen 表示)
+- [ ] G2 frame タップ → `Connecting...` → `LIVE` 遷移
+- [ ] 発話 1 〜 2 秒で字幕が出始める (`session.output_transcript.delta` が backend → client → SubtitleBuffer に流れる)
+- [ ] backend ログに以下が出る:
+  - [ ] `WS upgrade from <origin>`
+  - [ ] `OpenAI WS connected`
+  - [ ] N 件の `transcript.delta relayed`
+  - [ ] session duration / chunk count の summary
+- [ ] Double tap → `Closing...` → cleanup
+- [ ] §6 rollback ゲート条件 (Discord #7 回答 + 上記実機 1 ラウンド成功) が満たされない限り Step 7b (物理削除) は実行しない
+
+### 8.4 ドキュメント
+- [ ] `docs/realtime-translation-eveng2-mvp-design.md` が新アーキテクチャと整合
+- [ ] `docs/test-plan.md` を WS 経路向けに更新、テスト件数も実値に
+- [ ] README の Current Status / Milestone を更新
 
 ## 9. Estimated effort
 
@@ -331,7 +420,9 @@ Phase 2 移行が失敗 (= 実機で別の blocker が出た / Discord で getUs
 
 並列化で Wall-clock は 2-3 days まで圧縮可能 (Claude が swarm-dev で T1/T2/T3 を並列実装する場合)。
 
-## 10. Codex review (2026-05-11) — 反映済み
+## 10. Codex reviews — 反映ログ
+
+### 10.1 1st review (2026-05-11)
 
 Codex (cross-model) レビューで指摘された BLOCKING / HIGH / MEDIUM を本 plan に反映した。受領した指摘の対応状況:
 
@@ -349,4 +440,19 @@ Codex (cross-model) レビューで指摘された BLOCKING / HIGH / MEDIUM を�
 | **M-3** | app.json whitelist 更新方針 | T7.6 / Step 7b で明示 |
 | **M-4** | テスト数値乖離 | 実際の baseline (`pnpm -r test` 2026-05-11) で更新、`docs/test-plan.md` の古い数値は T7.2 で同時 update |
 | **L-1** | `session.created` に metadata 含める | T1.2 (server→client protocol) に追加 |
-| **L-2** | mock bridge を stateful 化 | T0.2 を expand
+| **L-2** | mock bridge を stateful 化 | T0.2 を expand |
+
+### 10.2 2nd review (2026-05-11、反映後の再レビュー)
+
+判定: **APPROVE_WITH_CONDITIONS**。BLOCKING 0 / HIGH 3 / MEDIUM 3 / LOW 0。前回 13 件は M-1 のみ部分対応で残りは OK。新規 6 件を反映:
+
+| ID | 内容 | 対応 |
+|---|---|---|
+| **H-5** | `audio.input.transcription` (`gpt-realtime-whisper`) が `session.update` から欠落 | T2.2 の初期送信 payload に追記 |
+| **H-6** | Vite proxy に `ws: true` が plan に書かれていない | T5.4 を新設して明記 |
+| **H-7** | rollback の DI 切替が抽象すぎる | T5.1 で `TranslationRuntime` interface + factory 一本化、§6 を更新 |
+| **M-5** | §4 dependency graph 自己矛盾 (T0/T1/T2/T3) | §4 を書き直し、各 step の入出依存を明示 |
+| **M-6** | resampler 配置が `apps/` と `packages/shared/` で割れている | `packages/shared/src/audio/pcm.ts` に集約、§2.1 図と §2.3 表を整合 |
+| **M-7** | §8 受け入れ条件の手動 checklist 不足 | §8 を 4 段 (自動 / WS smoke / 実機 / docs) に分割、Tailscale Serve origin・proxy ws・OpenAI smoke 期待 event を明記 |
+
+API contract 大枠 (endpoint, Bearer auth, Safety Identifier header) は公式 docs で再確認済みで問題なし。
