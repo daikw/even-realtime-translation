@@ -17,6 +17,18 @@ export type {
   TranslationSessionRequest,
   TranslationSessionResponse,
 } from './types/api.js'
+export type {
+  ClientWsAudio,
+  ClientWsClose,
+  ClientWsLanguage,
+  ClientWsMessage,
+  ClientWsOpen,
+  ServerWsAudioDelta,
+  ServerWsError,
+  ServerWsMessage,
+  ServerWsSessionCreated,
+  ServerWsTranscriptDelta,
+} from './types/realtime-ws.js'
 
 // Runtime exports.
 export {
