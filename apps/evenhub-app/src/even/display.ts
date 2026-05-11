@@ -113,6 +113,13 @@ export class HudDisplay {
         yPosition: 0,
         width: 576,
         height: 288,
+        // Required so the host (firmware or simulator) forwards CLICK /
+        // DOUBLE_CLICK / SCROLL_TOP / SCROLL_BOTTOM events back to this
+        // container. The simulator README is explicit: "Input is only
+        // effective when the app has an active event container ... If
+        // nothing is listening, the action is silently ignored." Without
+        // this flag, `subscribeInput`'s handler never fires.
+        isEventCapture: 1,
         content: '',
       })
       const container = new CreateStartUpPageContainer({
