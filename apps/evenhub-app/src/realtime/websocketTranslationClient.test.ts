@@ -375,6 +375,152 @@ describe('createWebSocketTranslationClient — reconnect', () => {
   })
 })
 
+describe('createWebSocketTranslationClient — Codex review regressions', () => {
+  // H-1: stop() permanently dispose()'d the ReconnectController; a second
+  // start() then failed to reconnect after any transient close because the
+  // shared controller rejected scheduleNext() immediately.
+  it('H-1: stop() → start() → unexpected close still reconnects (fresh controller)', async () => {
+    const h = await startClient()
+    await h.client.stop()
+    expect(h.client.getState()).toBe('idle')
+
+    // Second start() — controller must be recreated.
+    const restart = h.client.start()
+    const second = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]!
+    second.simulateOpen()
+    await restart
+    expect(h.client.getState()).toBe('connected')
+
+    // Now trigger a reconnectable close and verify a new socket opens.
+    const before = FakeWebSocket.instances.length
+    second.simulateClose(1011)
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    expect(FakeWebSocket.instances.length).toBeGreaterThan(before)
+    FakeWebSocket.instances[FakeWebSocket.instances.length - 1]!.simulateOpen()
+    expect(h.client.getState()).toBe('connected')
+
+    await h.client.stop()
+  })
+
+  // H-2: original onclose called reject(...) for never-opened sockets AND
+  // fell through into scheduleReconnect(). A failed start() should leave the
+  // client idle, not silently retry behind the user's back.
+  it('H-2: start() rejection on pre-open close does not schedule a background reconnect', async () => {
+    const mic = makeMicHandle()
+    const states: WsConnectionState[] = []
+    const client = createWebSocketTranslationClient({
+      backendUrl: 'ws://x/y',
+      targetLanguage: 'ja',
+      micHandle: mic.handle,
+      onOutputTranscriptDelta: () => undefined,
+      onStateChange: (s): void => {
+        states.push(s)
+      },
+      wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+      reconnectOptions: { maxAttempts: 3, baseDelayMs: 1 },
+    })
+    const start = client.start()
+    const first = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]!
+    first.simulateClose(1011) // close before open
+    await expect(start).rejects.toThrow(/closed before open/)
+
+    const countAfterReject = FakeWebSocket.instances.length
+    await new Promise<void>((resolve) => setTimeout(resolve, 20))
+    expect(FakeWebSocket.instances.length).toBe(countAfterReject)
+    expect(client.getState()).toBe('failed')
+  })
+
+  // H-3: a terminal failure (non-reconnectable code or max-attempts exhausted)
+  // used to leave mic.onPcm subscribed, burning CPU on chunks that have no
+  // socket to ship them through.
+  it('H-3a: terminal close (non-reconnectable code) detaches the mic subscription', async () => {
+    const h = await startClient()
+    const sock = FakeWebSocket.instances[0]!
+    expect(h.mic.handlerCount()).toBe(1)
+    sock.simulateClose(4404) // not in RECONNECTABLE_CLOSE_CODES → terminal
+    expect(h.client.getState()).toBe('failed')
+    expect(h.mic.handlerCount()).toBe(0)
+  })
+
+  it('H-3b: exhausting max reconnect attempts detaches the mic subscription', async () => {
+    const mic = makeMicHandle()
+    const client = createWebSocketTranslationClient({
+      backendUrl: 'ws://x/y',
+      targetLanguage: 'ja',
+      micHandle: mic.handle,
+      onOutputTranscriptDelta: () => undefined,
+      onStateChange: () => undefined,
+      onError: () => undefined,
+      wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+      reconnectOptions: { maxAttempts: 1, baseDelayMs: 1 },
+    })
+    const startPromise = client.start()
+    const first = FakeWebSocket.instances[0]!
+    first.simulateOpen()
+    await startPromise
+    expect(mic.handlerCount()).toBe(1)
+
+    first.simulateClose(1011) // first reconnect attempt
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    const second = FakeWebSocket.instances[1]
+    if (second) second.simulateClose(1011) // exhausts maxAttempts=1
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    expect(client.getState()).toBe('failed')
+    expect(mic.handlerCount()).toBe(0)
+
+    await client.stop()
+  })
+
+  // H-4: `meta: null` slipped past `typeof obj.meta !== 'object'` because
+  // `typeof null === 'object'`. Server frame with `meta: null` then threw on
+  // `meta.model` and tore down the message loop.
+  it('H-4: server.session.created with meta=null is dropped, not thrown', async () => {
+    const h = await startClient()
+    const sock = FakeWebSocket.instances[0]!
+    expect(() => {
+      sock.simulateMessage({ type: 'session.created', meta: null })
+    }).not.toThrow()
+    // Subsequent transcripts still flow.
+    sock.simulateMessage({ type: 'transcript.delta', source: 'output', text: 'ok' })
+    expect(h.outputs).toHaveLength(1)
+    await h.client.stop()
+  })
+
+  // M-1: code 1000 (normal closure) used to be on the reconnect path.
+  // Backend uses 1000 for many deliberate teardowns — we'd loop until
+  // max-attempts on every benign close.
+  it('M-1: close code 1000 (normal) does not trigger a reconnect', async () => {
+    const h = await startClient()
+    const sock = FakeWebSocket.instances[0]!
+    const before = FakeWebSocket.instances.length
+    sock.simulateClose(1000)
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    expect(FakeWebSocket.instances.length).toBe(before)
+    expect(h.client.getState()).toBe('failed')
+  })
+
+  // M-2: concurrent start() must share the pending Promise so the second
+  // caller doesn't resolve before the WS is actually open.
+  it('M-2: concurrent start() calls return the same in-flight Promise', async () => {
+    const mic = makeMicHandle()
+    const client = createWebSocketTranslationClient({
+      backendUrl: 'ws://x/y',
+      targetLanguage: 'ja',
+      micHandle: mic.handle,
+      onOutputTranscriptDelta: () => undefined,
+      onStateChange: () => undefined,
+      wsImpl: FakeWebSocket as unknown as typeof WebSocket,
+    })
+    const a = client.start()
+    const b = client.start()
+    expect(a).toBe(b) // identity, not just equivalence
+    FakeWebSocket.instances[0]!.simulateOpen()
+    await a
+    expect(client.getState()).toBe('connected')
+    await client.stop()
+  })
+})
+
 describe('createWebSocketTranslationClient — message hardening', () => {
   it('drops non-JSON payloads silently', async () => {
     const h = await startClient()

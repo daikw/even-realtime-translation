@@ -46,6 +46,13 @@ export interface BridgeMicHandle {
  * frames, and there is no recovery the caller can perform synchronously.
  * Decode errors are logged once and the chunk is dropped.
  */
+/** Format any thrown value for diagnostic logging. Non-Error throws used to
+ * produce `undefined` via `(err as Error).message` — keep the stringification
+ * stable (Codex review L-2). */
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 export async function acquireBridgeMic(bridge: EvenAppBridge): Promise<BridgeMicHandle> {
   const handlers = new Set<BridgeMicHandler>()
   let stopped = false
@@ -63,14 +70,18 @@ export async function acquireBridgeMic(bridge: EvenAppBridge): Promise<BridgeMic
     } catch (err) {
       // Surface once for visibility — a real fault here is a bridge-side
       // regression that the operator wants to see during dev.
-      console.warn('[bridgeMic] dropping malformed audio chunk:', (err as Error).message)
+      console.warn('[bridgeMic] dropping malformed audio chunk:', describeError(err))
       return
     }
+    // Handlers receive a *shared* Int16Array. By convention they must not
+    // mutate it — that contract is cheaper than slice()-ing per handler
+    // (the resampler downstream is the hot path). If we ever need true
+    // isolation, switch to `fn(samples.slice())` (Codex review L-1).
     for (const fn of handlers) {
       try {
         fn(samples)
       } catch (err) {
-        console.warn('[bridgeMic] handler threw:', (err as Error).message)
+        console.warn('[bridgeMic] handler threw:', describeError(err))
       }
     }
   })

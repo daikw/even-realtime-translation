@@ -63,6 +63,11 @@ export interface WebSocketTranslationClient {
   getState(): WsConnectionState
 }
 
+// 1000 (normal closure) is intentionally excluded — the backend uses it for
+// both deliberate teardowns (auth refusal, idle gate) and successful client
+// `stop()` flows. Reconnecting on 1000 turns a benign close into an infinite
+// loop. The relay surfaces a synthetic 1011 if it wants the client to retry
+// (Codex review M-1).
 const RECONNECTABLE_CLOSE_CODES = new Set([
   1001, // going away
   1006, // abnormal closure
@@ -79,7 +84,12 @@ export function createWebSocketTranslationClient(
   if (Ws === undefined) {
     throw new Error('WebSocket is not available in this runtime')
   }
-  const reconnect = new ReconnectController(opts.reconnectOptions ?? {})
+  // ReconnectController.dispose() is permanent, so a fresh controller is
+  // created on every start() call. Holding a single long-lived instance
+  // (the original implementation) made stop()→start()→reconnect die
+  // immediately on the first transient close (Codex review H-1).
+  const reconnectOptions = opts.reconnectOptions ?? {}
+  let reconnect = new ReconnectController(reconnectOptions)
 
   let ws: WebSocket | null = null
   let micUnsubscribe: (() => void) | null = null
@@ -87,6 +97,9 @@ export function createWebSocketTranslationClient(
   let started = false
   let currentTarget: LanguageCode = opts.targetLanguage
   let state: WsConnectionState = 'idle'
+  // Shared promise for concurrent start() calls so a second start() doesn't
+  // resolve early (Codex review M-2).
+  let startPromise: Promise<void> | null = null
 
   function setState(next: WsConnectionState): void {
     if (state === next) return
@@ -149,11 +162,10 @@ export function createWebSocketTranslationClient(
     if (msg === null) return
     switch (msg.type) {
       case 'session.created':
-        // Backend has confirmed the upstream session. We don't expose this
-        // to the UI today; only kept for dev-time observability.
-        if (typeof console !== 'undefined' && typeof console.debug === 'function') {
-          console.debug('[ws-translation] session.created', msg.meta)
-        }
+        // Backend has confirmed the upstream session. `meta.upstreamSessionId`
+        // is an implementation detail of the relay so we intentionally do not
+        // log it here — observability lives in the backend pino stream
+        // (Codex review M-3).
         return
       case 'transcript.delta': {
         const delta: TranscriptDelta =
@@ -254,22 +266,36 @@ export function createWebSocketTranslationClient(
           return
         }
         if (!resolved) {
-          // Never opened — the initial start() promise must reject.
+          // Never opened — the initial start() promise must reject. Don't
+          // also schedule a reconnect: the caller is awaiting start() and a
+          // background reconnect after a rejected promise would leave the
+          // client in a state inconsistent with the API contract (Codex
+          // review H-2).
           resolved = true
+          detachMic()
+          setState('failed')
           reject(new Error(`ws closed before open (code=${String(ev.code)})`))
+          return
         }
-        if (RECONNECTABLE_CLOSE_CODES.has(ev.code) || ev.code === 1000 || ev.code === 0) {
-          // 1000 (normal) is included here because some upstream paths close
-          // the relay with a vanilla "normal closure" even on transient
-          // failures (e.g. OpenAI session expiry). Letting the reconnect
-          // controller cap the retries keeps this benign.
+        if (RECONNECTABLE_CLOSE_CODES.has(ev.code)) {
           scheduleReconnect()
         } else {
+          // Permanent failure → release mic + tear down reconnect controller
+          // so we stop spending CPU on resample/base64 for chunks that have
+          // nowhere to go (Codex review H-3).
+          detachMic()
           setState('failed')
           reportError(new Error(`ws closed permanently (code=${String(ev.code)})`))
         }
       }
     })
+  }
+
+  function detachMic(): void {
+    if (micUnsubscribe !== null) {
+      micUnsubscribe()
+      micUnsubscribe = null
+    }
   }
 
   function scheduleReconnect(): void {
@@ -278,33 +304,40 @@ export function createWebSocketTranslationClient(
       .scheduleNext(() => openSocket())
       .catch((err: unknown) => {
         if (stopped) return
+        // Max attempts hit → terminal failure. Release the mic for the same
+        // reason as the non-reconnectable close path above (Codex review H-3).
+        detachMic()
         setState('failed')
         reportError(err)
       })
   }
 
-  async function start(): Promise<void> {
-    if (started && !stopped) return
+  function start(): Promise<void> {
+    if (startPromise !== null) return startPromise
+    if (started && !stopped) return Promise.resolve()
     started = true
     stopped = false
-    reconnect.reset()
+    // Recreate the reconnect controller — a previous stop() may have
+    // dispose()'d the old one permanently (Codex review H-1).
+    reconnect = new ReconnectController(reconnectOptions)
     setState('connecting')
-    try {
-      await openSocket()
-    } catch (err) {
-      if (!stopped) setState('failed')
-      throw err
-    }
+    const p = openSocket()
+      .catch((err) => {
+        if (!stopped) setState('failed')
+        throw err
+      })
+      .finally(() => {
+        startPromise = null
+      })
+    startPromise = p
+    return p
   }
 
   async function stop(): Promise<void> {
     if (!started) return
     stopped = true
     reconnect.dispose()
-    if (micUnsubscribe !== null) {
-      micUnsubscribe()
-      micUnsubscribe = null
-    }
+    detachMic()
     const sock = ws
     if (sock !== null) {
       // Send graceful close so the backend forwards `session.close` upstream
@@ -340,19 +373,28 @@ export function createWebSocketTranslationClient(
 // Server-message validation.
 // ──────────────────────────────────────────────────────────────────────────
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  // `typeof null === 'object'` so the null guard is non-negotiable — without
+  // it a server frame with `meta: null` would throw before reaching the
+  // discriminated-union branches (Codex review H-4).
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function parseServerMessage(value: unknown): ServerWsMessage | null {
-  if (typeof value !== 'object' || value === null) return null
-  const obj = value as Record<string, unknown>
-  switch (obj.type) {
+  if (!isRecord(value)) return null
+  switch (value.type) {
     case 'session.created': {
-      const meta = obj.meta as Record<string, unknown> | undefined
-      if (meta === undefined || typeof meta !== 'object') return null
+      const meta = value.meta
+      if (!isRecord(meta)) return null
       if (typeof meta.model !== 'string') return null
       if (typeof meta.targetLanguage !== 'string') return null
       return {
         type: 'session.created',
         meta: {
           model: meta.model,
+          // Cast is safe at runtime — the server only emits codes from the
+          // shared `LanguageCode` set. A mismatched cast would fail at the
+          // UI layer (which checks against SUPPORTED_LANGUAGES) not here.
           targetLanguage: meta.targetLanguage as LanguageCode,
           ...(typeof meta.upstreamSessionId === 'string'
             ? { upstreamSessionId: meta.upstreamSessionId }
@@ -361,23 +403,23 @@ function parseServerMessage(value: unknown): ServerWsMessage | null {
       }
     }
     case 'transcript.delta': {
-      const source = obj.source
+      const source = value.source
       if (source !== 'input' && source !== 'output') return null
-      if (typeof obj.text !== 'string') return null
+      if (typeof value.text !== 'string') return null
       return {
         type: 'transcript.delta',
         source,
-        text: obj.text,
-        ...(typeof obj.itemId === 'string' ? { itemId: obj.itemId } : {}),
+        text: value.text,
+        ...(typeof value.itemId === 'string' ? { itemId: value.itemId } : {}),
       }
     }
     case 'audio.delta': {
-      if (typeof obj.pcm !== 'string' || obj.pcm.length === 0) return null
-      return { type: 'audio.delta', pcm: obj.pcm }
+      if (typeof value.pcm !== 'string' || value.pcm.length === 0) return null
+      return { type: 'audio.delta', pcm: value.pcm }
     }
     case 'error': {
-      const code = typeof obj.code === 'string' ? obj.code : 'unknown'
-      const message = typeof obj.message === 'string' ? obj.message : 'Unknown error'
+      const code = typeof value.code === 'string' ? value.code : 'unknown'
+      const message = typeof value.message === 'string' ? value.message : 'Unknown error'
       return { type: 'error', code, message }
     }
     default:
