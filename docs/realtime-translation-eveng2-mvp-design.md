@@ -38,23 +38,31 @@ PoC の狙いは以下の 3 点。
 
 2. PoC の結論
 
-最初の実装は以下を採用する。
+**現在の採用構成 (2026-05-13 時点、Phase 2 移行後):**
 
-Phase 1: phone mic + OpenAI WebRTC + G2字幕
+`G2 mic (bridge.audioControl) + backend WebSocket proxy + 16→24 kHz resample + G2字幕`
 
-理由は以下。
+これは元設計の **Phase 2 構成** にあたる。Phase 1 (getUserMedia + WebRTC) は
+2026-05-11 の実機検証で iOS WKWebView の policy により恒久的に動作不能で
+あることが確定し (Issue #7、Discord 一次情報あり)、Phase 2 へ前倒し移行した。
+詳細経緯は [`docs/phase2-migration-plan.md`](./phase2-migration-plan.md) §1。
 
-* ブラウザ/WebView標準の getUserMedia() と WebRTC を利用できるため、OpenAI側で推奨される実装に近い。
-* WebView側で音声resamplingやPCM playbackを自前実装しなくて済む。
-* OpenAI API keyをWebViewに置かず、backendから短命client secretを発行できる。
-* G2 SDK部分は表示・入力・状態管理に集中できる。
-* PoC初期の不確実性を、Even SDKのG2マイク仕様ではなく、UX検証に寄せられる。
+採用理由:
+* `bridge.audioControl(true)` + `audioEvent.audioPcm` が Even Hub 公式に
+  サポートされる唯一の WebView 内 mic 取得経路。
+* OpenAI Realtime Translation API は WebSocket transport をサポートし
+  WebRTC と同じ翻訳品質。
+* バックエンド WS proxy 経由で OpenAI API key を WebView に露出させない。
+* G2 SDK 部分は表示・入力・状態管理に集中できる (Phase 1 と同じ価値)。
 
-次段階として、以下を検証する。
+実装コスト (Phase 1 と比較して増えた点):
+* 16 kHz → 24 kHz resampling を frontend で実施 (`packages/shared/src/audio/pcm.ts`)
+* base64 PCM16 over WebSocket (frontend ↔ backend ↔ OpenAI)
+* WebSocket reconnect / grace-period (T0.1 spike findings §10.3)
 
-Phase 2: G2 mic + backend WebSocket + WASM audio processing + G2字幕
-
-Phase 2 では、G2らしさが増す一方、G2マイク音声の取得、16kHz→24kHz resampling、base64 PCM16送信、ストリーム切断処理、WebView lifecycle対応が増える。
+> 旧 "Phase 1: phone mic + OpenAI WebRTC" の記述は本ドキュメントの §5.1 /
+> §6.3 / §9.1 / §14.1 / §15.2 に残っているが、**現在は無効** (deprecated)。
+> 物理削除は §6 rollback gate (実機 1 ラウンド成功) 通過後の T7b で行う。
 
 ⸻
 
@@ -148,7 +156,13 @@ Akerun APIや社内APIと連携し、場所・扉・予定に応じたHUDを表�
 
 5. システム構成
 
-5.1 Phase 1 構成
+5.1 ~~Phase 1 構成~~ (deprecated)
+
+> ⚠️ この構成は 2026-05-11 の実機検証で **iOS WKWebView の policy により
+> `getUserMedia()` が `NotAllowedError` となる** ことが確定し、恒久的に
+> 動作不能であることが分かった (Issue #7、Discord 複数開発者の一次情報)。
+> 採用構成は §5.2 (現行: Phase 2) を参照。本セクションは rollback gate
+> 通過後の T7b で削除予定。
 
 Even G2 Glasses
   ├─ Display: translated subtitle HUD
@@ -159,15 +173,15 @@ Phone
        └─ WebView
             └─ Even Hub App
                  ├─ @evenrealities/even_hub_sdk
-                 ├─ getUserMedia(phone mic)
-                 ├─ RTCPeerConnection
-                 ├─ OpenAI Realtime Translation WebRTC call
+                 ├─ ~~getUserMedia(phone mic)~~ ← 恒久的に NotAllowedError
+                 ├─ ~~RTCPeerConnection~~
+                 ├─ ~~OpenAI Realtime Translation WebRTC call~~
                  ├─ G2 display renderer
                  └─ settings UI
 Backend
-  ├─ POST /api/openai/realtime/translation/session
+  ├─ POST /api/openai/realtime/translation/session (deprecated)
   ├─ OpenAI API key management
-  ├─ client secret issuance
+  ├─ client secret issuance (rollback 用に残置)
   ├─ audit/logging
   └─ optional usage metering
 OpenAI API
