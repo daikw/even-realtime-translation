@@ -30,6 +30,11 @@ export type TargetLanguageCode = Exclude<LanguageCode, 'auto'>
 
 export interface TranslationRuntimeStartOpts {
   targetLanguage: TargetLanguageCode
+  /** Source-language hint. The WS runtime currently **ignores** this — the
+   * backend WS relay does not yet accept a source hint in its
+   * \`session.update\` payload (Codex review M-1). The WebRTC runtime
+   * forwards it through \`createSession\` for the legacy client_secret
+   * flow. */
   sourceHint: LanguageCode
   /** Translated text deltas (target language). */
   onOutputTranscriptDelta: (delta: TranscriptDelta) => void

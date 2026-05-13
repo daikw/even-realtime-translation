@@ -63,6 +63,11 @@ export interface WebRtcTranslationClient {
   getState(): RTCPeerConnectionState
 }
 
+/** @deprecated Phase 2 (2026-05-12). Use
+ * \`createWebSocketTranslationClient\` (driven by \`createWebSocketRuntimeFactory\`)
+ * instead. The WebRTC path depends on \`getUserMedia\`, which is blocked in
+ * the iOS WKWebView (Issue #7). Retained until T7b clears the §6 rollback
+ * gate (see file header). */
 export function createWebRtcTranslationClient(
   opts: WebRtcTranslationOpts,
 ): WebRtcTranslationClient {

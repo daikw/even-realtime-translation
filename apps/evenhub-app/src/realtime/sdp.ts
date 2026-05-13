@@ -73,6 +73,9 @@ function isAcceptableBaseUrl(raw: string): boolean {
   return false
 }
 
+/** @deprecated Phase 2 (2026-05-12). SDP exchange is WebRTC-only; the WS
+ * path does not perform an SDP handshake. Retained until T7b clears the
+ * §6 rollback gate (see file header). */
 export async function exchangeSdp(opts: ExchangeSdpOptions): Promise<string> {
   const candidate = opts.baseUrl ?? DEFAULT_BASE_URL
   const safeBaseUrl = isAcceptableBaseUrl(candidate) ? candidate : DEFAULT_BASE_URL

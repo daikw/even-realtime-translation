@@ -44,6 +44,10 @@ function isPermissionLikeError(err: unknown): boolean {
   return name === 'NotAllowedError' || name === 'NotFoundError'
 }
 
+/** @deprecated Phase 2 (2026-05-12). Use \`acquireBridgeMic\` from
+ * \`audio/bridgeMic.ts\` instead — \`getUserMedia\` is blocked in the iOS
+ * WKWebView (Issue #7). This export is retained until T7b clears the §6
+ * rollback gate (see file header). */
 export async function acquirePhoneMic(opts: AcquirePhoneMicOptions = {}): Promise<MediaStream> {
   const devices: MediaDevices | undefined =
     opts.mediaDevices ??
@@ -67,6 +71,9 @@ export async function acquirePhoneMic(opts: AcquirePhoneMicOptions = {}): Promis
  * Stop every track on the stream. We swallow per-track exceptions so a single
  * misbehaving sender can't leave others running (the indicator only clears
  * when every track is in `ended` state).
+ *
+ * @deprecated Phase 2 (2026-05-12). Bridge mic teardown lives in
+ * \`acquireBridgeMic\`'s returned \`stop()\`. Retained until T7b.
  */
 export function stopMediaStream(stream: MediaStream): void {
   for (const track of stream.getTracks()) {

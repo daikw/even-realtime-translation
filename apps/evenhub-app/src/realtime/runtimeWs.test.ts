@@ -4,6 +4,7 @@ import type { TranscriptDelta } from '@even-rt/shared'
 import { createMockBridge } from '../even/bridge.mock.js'
 import type { BridgeMicHandle, BridgeMicHandler } from '../audio/bridgeMic.js'
 import {
+  BackendError,
   MicPermissionError,
   type TranslationRuntimeStartOpts,
 } from './runtime.js'
@@ -361,6 +362,144 @@ describe('createWebSocketRuntimeFactory — failure modes', () => {
     await runtime.stop()
     const h = makeStartOpts()
     await expect(runtime.start(h.startOpts)).rejects.toThrow(/already stopped/)
+  })
+})
+
+describe('createWebSocketRuntimeFactory — Codex review regressions', () => {
+  // H-1: client.start() rejection used to call mic.stop() but leave the
+  // partially-open client (and any reconnect timer) running.
+  it('H-1: client.start() rejection tears down BOTH mic and client', async () => {
+    const factory = createWebSocketRuntimeFactory({
+      bridge,
+      backendWsUrl: '/api/realtime/ws',
+      acquireMic: () => Promise.resolve(micHelpers.handle),
+      createClient: (opts) => {
+        ;(fakeClient as unknown as { __setOpts: (o: typeof opts) => void }).__setOpts(opts)
+        return fakeClient
+      },
+    })
+    fakeClient.failNextStart(new Error('handshake refused'))
+    const runtime = factory.create()
+    const h = makeStartOpts()
+    await expect(runtime.start(h.startOpts)).rejects.toThrow(/handshake refused/)
+    expect(micHelpers.stopped()).toBe(true)
+    expect(fakeClient.stopCount).toBe(1)
+  })
+
+  // H-2: createClient() throwing synchronously used to leak the mic — the
+  // try/catch only covered client.start().
+  it('H-2: createClient() constructor throw releases the mic', async () => {
+    const factory = createWebSocketRuntimeFactory({
+      bridge,
+      backendWsUrl: '/api/realtime/ws',
+      acquireMic: () => Promise.resolve(micHelpers.handle),
+      createClient: () => {
+        throw new Error('WS unavailable in this runtime')
+      },
+    })
+    const runtime = factory.create()
+    const h = makeStartOpts()
+    await expect(runtime.start(h.startOpts)).rejects.toThrow(/WS unavailable/)
+    expect(micHelpers.stopped()).toBe(true)
+  })
+
+  // H-3: a second start() after success used to spin up a second
+  // mic+client pair (and orphan the first). After the fix the second
+  // call resolves immediately without re-entering openSession.
+  it('H-3: start() after successful start is a no-op', async () => {
+    const factory = createWebSocketRuntimeFactory({
+      bridge,
+      backendWsUrl: '/api/realtime/ws',
+      acquireMic: () => Promise.resolve(micHelpers.handle),
+      createClient: (opts) => {
+        ;(fakeClient as unknown as { __setOpts: (o: typeof opts) => void }).__setOpts(opts)
+        return fakeClient
+      },
+    })
+    const runtime = factory.create()
+    const h = makeStartOpts()
+    await runtime.start(h.startOpts)
+    // Second call: must not produce a second client.start().
+    await runtime.start(h.startOpts)
+    expect(fakeClient.startCount).toBe(1)
+    expect(micHelpers.handlerCount()).toBe(0) // fake client doesn't subscribe
+    await runtime.stop()
+  })
+
+  // H-4: backend error frames used to surface as generic Error. App.ts
+  // wants to branch on rate_limited / auth_error / upstream_error via
+  // `instanceof BackendError`.
+  it('H-4: WS client error frames are normalised to BackendError before onError', async () => {
+    const factory = createWebSocketRuntimeFactory({
+      bridge,
+      backendWsUrl: '/api/realtime/ws',
+      acquireMic: () => Promise.resolve(micHelpers.handle),
+      createClient: (opts) => {
+        ;(fakeClient as unknown as { __setOpts: (o: typeof opts) => void }).__setOpts(opts)
+        return fakeClient
+      },
+    })
+    const runtime = factory.create()
+    const h = makeStartOpts()
+    await runtime.start(h.startOpts)
+
+    // WS client emits the documented "ws translation error [<code>]: <message>"
+    // shape; the runtime should normalise it.
+    fakeClient.fireError(new Error('ws translation error [rate_limited]: slow down'))
+    expect(h.errors).toHaveLength(1)
+    expect(h.errors[0]).toBeInstanceOf(BackendError)
+    const be = h.errors[0] as BackendError
+    expect(be.code).toBe('rate_limited')
+    expect(be.message).toBe('slow down')
+    await runtime.stop()
+  })
+
+  // H-4 negative: non-matching error messages stay generic.
+  it('H-4: non-WS-pattern errors are surfaced as plain Error (not BackendError)', async () => {
+    const factory = createWebSocketRuntimeFactory({
+      bridge,
+      backendWsUrl: '/api/realtime/ws',
+      acquireMic: () => Promise.resolve(micHelpers.handle),
+      createClient: (opts) => {
+        ;(fakeClient as unknown as { __setOpts: (o: typeof opts) => void }).__setOpts(opts)
+        return fakeClient
+      },
+    })
+    const runtime = factory.create()
+    const h = makeStartOpts()
+    await runtime.start(h.startOpts)
+    fakeClient.fireError(new Error('network blip'))
+    expect(h.errors).toHaveLength(1)
+    expect(h.errors[0]).not.toBeInstanceOf(BackendError)
+    expect(h.errors[0]!.message).toBe('network blip')
+    await runtime.stop()
+  })
+
+  // Bonus: stop() during in-flight start should not leave mic open.
+  it('stop() while start() is in flight tears down the mic acquired so far', async () => {
+    let resolveMic: (h: BridgeMicHandle) => void = () => undefined
+    const micPromise = new Promise<BridgeMicHandle>((resolve) => {
+      resolveMic = resolve
+    })
+    const factory = createWebSocketRuntimeFactory({
+      bridge,
+      backendWsUrl: '/api/realtime/ws',
+      acquireMic: () => micPromise,
+      createClient: (opts) => {
+        ;(fakeClient as unknown as { __setOpts: (o: typeof opts) => void }).__setOpts(opts)
+        return fakeClient
+      },
+    })
+    const runtime = factory.create()
+    const h = makeStartOpts()
+    const startP = runtime.start(h.startOpts)
+    // While start() is waiting on acquireMic, the App calls stop().
+    await runtime.stop()
+    // Now resolve the mic — the runtime should detect `stopped` and clean
+    // up rather than continue to open the WS.
+    resolveMic(micHelpers.handle)
+    await expect(startP).rejects.toThrow(/stopped/)
+    expect(micHelpers.stopped()).toBe(true)
   })
 })
 
