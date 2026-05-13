@@ -175,6 +175,20 @@ export class App {
       void this.onStatusChange(state)
     })
 
+    // Forward language-pair changes into the active runtime so mid-session
+    // swipe-to-rotate actually reaches the backend. Without this the reducer
+    // updates languagePair but OpenAI keeps translating to the old target.
+    let prevTarget: AppState['languagePair']['target'] = this.store.getState().languagePair.target
+    this.store.subscribe((state) => {
+      const next = state.languagePair.target
+      if (next === prevTarget) return
+      prevTarget = next
+      if (next === 'auto') return // not a valid output target
+      const runtime = this.runtime
+      if (runtime === null) return
+      runtime.sendLanguageUpdate(next)
+    })
+
     this.tickHandle = this.deps.setIntervalImpl(() => {
       this.store.dispatch({ type: 'TICK', nowMs: this.deps.now() })
     }, TICK_INTERVAL_MS)

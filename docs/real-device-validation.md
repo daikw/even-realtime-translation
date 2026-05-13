@@ -173,6 +173,11 @@ T0.1 spike (`docs/phase2-migration-plan.md §10.3`) で計測した参考値:
 - backend ログで `OpenAI WS connected` が出ているか
 - `OPENAI_API_KEY` の有効性 (`.env` の値で curl テスト)
 - `session.update` が送られているか (transcription model が `gpt-realtime-whisper` 設定済)
+- **入力言語**が `gpt-realtime-translate` のサポート対象か (`docs/realtime-translation-eveng2-mvp-design.md` §1 / Issue #6)
+  - 2026-05-13 実機検証時点で確認: **英語入力 → 日本語出力は動作**するが、**中国語入力は upstream が transcribe しない**
+    (`session.input_transcript.delta` が一切返らず、`session.output_audio.delta` が全て `AAAA...` 無音 frame)。
+    OpenAI Realtime Translation の preview モデルのサポート言語制約と推定。
+    動作確認には `SUPPORTED_LANGUAGES = ['en', 'ja', 'es', 'fr', 'ko']` 範囲内の入力を使うのが安全。
 
 ### `Mixed Content` エラー
 - iPhone Safari が HTTPS 経由なのに backend を `http://` で呼んでいる

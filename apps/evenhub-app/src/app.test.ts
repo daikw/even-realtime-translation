@@ -447,6 +447,41 @@ describe('App — TICK', () => {
   })
 })
 
+describe('App — language change wiring', () => {
+  it('forwards LANGUAGE_CHANGED to runtime.sendLanguageUpdate', async () => {
+    const rh = makeFakeRuntimeFactory()
+    const app = new App(defaultCfg(), defaultDeps(rh))
+    await app.boot()
+    app.dispatch({ type: 'START_REQUESTED' })
+    await flushMicrotasks()
+    rh.latest().fireState('connected')
+
+    app.dispatch({ type: 'LANGUAGE_CHANGED', pair: { source: 'auto', target: 'en' } })
+    expect(rh.latest().sendLanguageUpdate).toHaveBeenCalledWith('en')
+
+    // Dispatching the same target again must NOT re-fire sendLanguageUpdate.
+    app.dispatch({ type: 'LANGUAGE_CHANGED', pair: { source: 'auto', target: 'en' } })
+    expect(rh.latest().sendLanguageUpdate).toHaveBeenCalledTimes(1)
+
+    // Rotating to another target fires again.
+    app.dispatch({ type: 'LANGUAGE_CHANGED', pair: { source: 'auto', target: 'ko' } })
+    expect(rh.latest().sendLanguageUpdate).toHaveBeenCalledTimes(2)
+    expect(rh.latest().sendLanguageUpdate).toHaveBeenLastCalledWith('ko')
+
+    await app.dispose()
+  })
+
+  it('does not call sendLanguageUpdate when there is no active runtime', async () => {
+    const rh = makeFakeRuntimeFactory()
+    const app = new App(defaultCfg(), defaultDeps(rh))
+    await app.boot()
+    // No START_REQUESTED — no runtime exists yet.
+    app.dispatch({ type: 'LANGUAGE_CHANGED', pair: { source: 'auto', target: 'fr' } })
+    expect(rh.all()).toHaveLength(0)
+    await app.dispose()
+  })
+})
+
 describe('App — runtime factory error propagation', () => {
   it('factory.create() throwing surfaces as ERROR rtc_error', async () => {
     const rh = makeFakeRuntimeFactory()
