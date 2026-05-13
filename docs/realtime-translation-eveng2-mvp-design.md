@@ -2,20 +2,9 @@ Even G2 Realtime Translation HUD 設計書
 
 ---
 
-⚠️ **Phase 2 migration in progress (2026-05-13).**
+📝 **Phase 2 migration complete (2026-05-13).**
 
-実機検証 (2026-05-11) で **Phase 1 (`getUserMedia` + WebRTC) は iOS WKWebView の policy で blocker** になることが確定し、`bridge.audioControl(true)` + バックエンド WS proxy 経路への移行を進めている (Issue #6 / #7)。
-
-本ドキュメントの以下のセクションは現在の実装と乖離している。整合が取れるまでは [`docs/phase2-migration-plan.md`](./phase2-migration-plan.md) を **single source of truth** として参照してほしい:
-
-- §2.x — PoC 結論 (transport を WebRTC と書いている部分)
-- §5.1 — Phase 1 audio capture (`navigator.mediaDevices.getUserMedia` 前提)
-- §6.3 — Realtime transport (WebRTC SDP exchange 前提)
-- §9.1 — `app.json` permission (`phone-microphone` のみ列挙)
-- §14.1 — クライアント↔OpenAI の直接接続
-- §15.2 — start sequence のステップ
-
-セクションごとの書き換えは T7b (`§6 rollback gate` 通過後) で実施する。それまでは本ドキュメントの該当箇所を読むときは plan §3 を併読してほしい。
+Phase 1 (`getUserMedia` + WebRTC) は iOS WKWebView の policy で恒久的に動作不能と確定した (Issue #7、Discord 一次情報あり)。現行実装は `bridge.audioControl(true)` + バックエンド WebSocket relay 経路で、設計書の §2 / §5.1 / §6.3 / §9.1 / §14.x / §15.2 はすべて Phase 2 後の状態に書き換え済。移行経緯の詳細は [`docs/phase2-migration-plan.md`](./phase2-migration-plan.md)、§6 rollback gate の通過手順は [`docs/real-device-validation.md`](./real-device-validation.md) を参照。
 
 ---
 
@@ -296,21 +285,33 @@ Response:
   "model": "gpt-realtime-translate"
 }
 
-6.3 OpenAI Translation Client
+6.3 OpenAI Translation Client (WebSocket)
 
-Phase 1ではWebRTCを使用する。
+OpenAI Realtime Translation API への接続は WebSocket transport で行う (`gpt-realtime-translate` model)。トランスポートの選択経緯は phase2-migration-plan.md §1 を参照。
 
-責務:
+実装:
 
-* backendからclient secretを取得
-* navigator.mediaDevices.getUserMedia({ audio: true })
-* RTCPeerConnection作成
-* mic trackをpeer connectionに追加
-* remote translated audio trackをphone audio elementに接続
-* data channelでOpenAI eventsを受信
-* session.output_transcript.delta を字幕バッファに渡す
-* session.input_transcript.delta を診断/ログ用に保持する
-* connection stateを監視し、UIに反映する
+* WebView 側: `apps/evenhub-app/src/realtime/runtimeWs.ts` + `websocketTranslationClient.ts`
+* Backend 側: `services/translation-backend/src/realtime-ws.ts` (`GET /api/realtime/ws` WS relay)
+
+責務 (frontend):
+
+* `acquireBridgeMic(bridge)` で G2 mic を開く (`bridge.audioControl(true)` + `audioEvent.audioPcm`)
+* 16 kHz S16LE PCM mono → 24 kHz PCM16 に resample (`packages/shared/src/audio/pcm.ts`)
+* base64 PCM16 を `{ type: 'audio', pcm }` で backend WS に送信
+* `{ type: 'open', targetLanguage }` で session 開始、`{ type: 'language', target }` で言語切替、`{ type: 'close' }` で graceful shutdown
+* `transcript.delta` を字幕バッファに渡す (source='output' は翻訳、source='input' は元言語の transcription)
+* `audio.delta` は M3+ で音声出力に使用 (現状は未消費でもよい設計)
+* `error` は normalised `{ code, message }`
+* 接続状態を `'idle' | 'connecting' | 'connected' | 'reconnecting' | 'failed'` で公開、reducer 経由で HUD に反映
+
+責務 (backend relay):
+
+* Origin allowlist + per-IP cap + maxPayload + idle timeout + ping/pong + back-pressure
+* `Authorization: Bearer ${OPENAI_API_KEY}` で OpenAI WS に接続 (server-side key、WebView には渡らない)
+* `OpenAI-Safety-Identifier: <sha256(salt|userId)>` ヘッダで匿名識別
+* 双方向 relay: client `{ type: 'audio' }` → upstream `{ type: 'session.input_audio_buffer.append' }`、upstream `session.output_transcript.delta` → client `{ type: 'transcript.delta' }` など (event 名 prefix の詳細は phase2-migration-plan.md §10.3)
+* graceful close は client `{ type: 'close' }` → upstream `{ type: 'session.close' }` → 6 s grace period で trailing deltas を flush してから tear down
 
 6.4 G2 Display Renderer
 
@@ -487,7 +488,9 @@ Look up	show summary
 
 9. 権限・manifest設計
 
-9.1 Phase 1 app.json例
+9.1 app.json (現行、Phase 2 後)
+
+実装: `apps/evenhub-app/app.json`
 
 {
   "package_id": "com.photosynth.g2translator",
@@ -500,15 +503,14 @@ Look up	show summary
   "permissions": [
     {
       "name": "network",
-      "desc": "Connects to the translation backend and OpenAI realtime translation endpoints.",
+      "desc": "Connects to the translation backend for the realtime translation WebSocket relay.",
       "whitelist": [
-        "https://g2-translate.example.com",
-        "https://api.openai.com"
+        "http://localhost:3000"
       ]
     },
     {
-      "name": "phone-microphone",
-      "desc": "Captures speech from the phone microphone for live translation."
+      "name": "g2-microphone",
+      "desc": "Captures speech from the G2 microphone via bridge.audioControl for live translation."
     }
   ],
   "supported_languages": ["en", "ja", "es", "fr", "ko"]
@@ -516,18 +518,10 @@ Look up	show summary
 
 注意:
 
-* Phase 1でWebViewからOpenAI WebRTC endpointへ直接SDPをPOSTする場合、https://api.openai.com をwhitelistに入れる必要がある。
-* backend経由に完全proxyする場合はOpenAI originをwhitelistから外せるが、WebRTC media pathの扱いが複雑になる。
-* network.whitelistはCORS回避ではないため、backend側CORSも別途必要。
-
-9.2 Phase 2 app.json追加
-
-{
-  "name": "g2-microphone",
-  "desc": "Captures speech from the glasses microphone for live translation."
-}
-
-Phase 2では phone-microphone と g2-microphone の両方を持たせ、設定画面で入力ソースを選択できるようにする。
+* WebView は backend WS proxy (`/api/realtime/ws`) のみに接続するため、OpenAI 直接 origin は whitelist から削除済。
+* `phone-microphone` permission は T7b で削除済 (iOS WKWebView の `getUserMedia` 制約により利用不能、Issue #7 参照)。
+* `network.whitelist` は CORS 回避ではないため、backend 側 CORS / Origin allowlist も別途必要 (`services/translation-backend/src/realtime-ws.ts` を参照)。
+* 本番 backend ドメインが決まったら `http://localhost:3000` を差し替える。
 
 ⸻
 
@@ -729,30 +723,66 @@ PoC初期は任意。
 
 14. OpenAI Realtime Translation連携
 
-14.1 Phase 1: WebRTC
+14.1 WebSocket relay (現行)
 
-1. WebView → backend: client secret request
-2. backend → OpenAI: create translation client secret
-3. backend → WebView: client secret
-4. WebView: getUserMedia({ audio: true })
-5. WebView: create RTCPeerConnection
-6. WebView: add mic track
-7. WebView: create data channel `oai-events`
-8. WebView → OpenAI: POST SDP offer to translation calls endpoint
-9. OpenAI → WebView: SDP answer
-10. WebView: receive translated audio track
-11. WebView: receive transcript delta events
-12. WebView → G2: update subtitle container
+```
+G2 mic                  WebView                    backend                  OpenAI
+  │                        │                          │                       │
+  │ bridge.audioControl(1) │                          │                       │
+  ├───────────────────────►│                          │                       │
+  │                        │                          │                       │
+  │  audioEvent.audioPcm   │                          │                       │
+  │  (16kHz S16LE mono)    │                          │                       │
+  │═══════════════════════►│                          │                       │
+  │                        │  WS upgrade              │                       │
+  │                        │  /api/realtime/ws        │                       │
+  │                        ├─────────────────────────►│                       │
+  │                        │                          │  WS connect           │
+  │                        │                          │  /v1/realtime/        │
+  │                        │                          │  translations         │
+  │                        │                          │  + Bearer + SafetyId  │
+  │                        │                          ├──────────────────────►│
+  │                        │  {open, targetLanguage}  │                       │
+  │                        ├─────────────────────────►│  {session.update,...} │
+  │                        │                          ├──────────────────────►│
+  │                        │  {audio, pcm:base64}     │  {session.input_      │
+  │                        │  resampled to 24kHz      │   audio_buffer.       │
+  │                        │═════════════════════════►│   append, audio}      │
+  │                        │                          ├══════════════════════►│
+  │                        │                          │                       │
+  │                        │                          │  session.input_       │
+  │                        │                          │  transcript.delta     │
+  │                        │  {transcript.delta,      │  (source language)    │
+  │                        │   source:'input'}        │◄══════════════════════│
+  │                        │◄═════════════════════════│  session.output_      │
+  │                        │  {transcript.delta,      │  transcript.delta     │
+  │                        │   source:'output'}       │  (translated)         │
+  │                        │◄═════════════════════════│◄══════════════════════│
+  │                        │                          │                       │
+HUD字幕                      │                          │  session.output_      │
+                          │  {audio.delta, pcm}      │  audio.delta          │
+                          │  (24kHz PCM16, M3+用)    │  (24kHz PCM16)        │
+                          │◄═════════════════════════│◄══════════════════════│
+```
 
-14.2 Phase 2: WebSocket
+steps:
 
-1. G2 mic audioControl(true)
-2. audioEvent receives PCM 16kHz mono
-3. WASM worker resamples to 24kHz PCM16
-4. WebView/backend sends session.input_audio_buffer.append
-5. OpenAI returns session.output_transcript.delta
-6. backend/WebView updates G2 subtitle
-7. optional output audio is played on phone
+1. WebView: `acquireBridgeMic(bridge)` → bridge.audioControl(true)
+2. bridge.onEvenHubEvent: `audioEvent.audioPcm` (16 kHz S16LE PCM mono、chunk 100ms 単位)
+3. WebView: `resample16to24` (pure linear interpolation、`packages/shared/src/audio/pcm.ts`)
+4. WebView: `samplesToBytesLE` → base64 → `{ type: 'audio', pcm }` を backend WS に送信
+5. backend: `{ type: 'session.input_audio_buffer.append', audio: <base64> }` を OpenAI に転送
+6. OpenAI: `session.output_transcript.delta` (翻訳テキスト) + `session.input_transcript.delta` (源言語) + `session.output_audio.delta` (翻訳音声、可変長) を返す
+7. backend: `{ type: 'transcript.delta', source, text }` / `{ type: 'audio.delta', pcm }` を WebView に転送
+8. WebView: SubtitleBuffer 経由で G2 字幕 container を更新
+
+14.2 graceful close
+
+* WebView ダブルタップ → `{ type: 'close' }` を backend に送信
+* backend → upstream `{ type: 'session.close' }` を送信
+* backend は 6 秒 grace period で trailing deltas を flush (T0.1 spike findings §10.3、OpenAI は close 後も ~5 秒 transcript を返してくる)
+* 6 秒経過後に upstream WS を close、続いて WebView 側も close
+* 全 deltas は字幕として G2 に表示済
 
 14.3 Translation sessionの注意
 
@@ -779,23 +809,29 @@ async function boot() {
 
 15.2 翻訳開始
 
+実装: `apps/evenhub-app/src/app.ts` (App.startSession) + `apps/evenhub-app/src/realtime/runtimeWs.ts`
+
+```ts
 async function startTranslation(state: AppState) {
   setStatus('connecting')
   await renderConnectingScreen()
-  const session = await api.createTranslationSession({
-    targetLanguage: state.targetLanguage
+  // runtime factory is constructed in App.boot via createWebSocketRuntimeFactory({ bridge, backendWsUrl })
+  const runtime = runtimeFactory.create()
+  await runtime.start({
+    targetLanguage: state.languagePair.target,
+    sourceHint: state.languagePair.source,
+    onOutputTranscriptDelta: (delta) => subtitleBuffer.append(delta.text),
+    onStateChange: (state) => handleConnectionState(state), // connected / reconnecting / failed → reducer
+    onError: (err) => {
+      if (err instanceof BackendError) dispatch({ type: 'ERROR', code: err.code, message: err.message })
+      // generic Error は observability のみ (status='error' へは飛ばさない)
+    },
   })
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-  const client = await createWebRtcTranslationClient({
-    clientSecret: session.clientSecret,
-    sourceStream: stream,
-    onOutputTranscriptDelta: delta => subtitleBuffer.append(delta),
-    onInputTranscriptDelta: delta => diagnostics.addSource(delta),
-    onRemoteAudioTrack: track => audioPlayer.play(track),
-    onStateChange: status => setConnectionStatus(status)
-  })
-  setStatus('live')
+  // runtime.start は 'connected' onStateChange のディスパッチで status='live' に遷移
 }
+```
+
+mic 取得 + WS 接続 + reconnect は runtime に内包されている (`acquireBridgeMic` → `createWebSocketTranslationClient`)。App 側は state machine と HUD render のみを駆動する。
 
 15.3 字幕更新
 

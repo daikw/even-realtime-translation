@@ -9,19 +9,14 @@
   "permissions": [
     {
       "name": "network",
-      "desc": "Connects to the translation backend and OpenAI realtime translation endpoints.",
+      "desc": "Connects to the translation backend for the realtime translation WebSocket relay.",
       "whitelist": [
-        "http://localhost:3000",
-        "https://api.openai.com"
+        "http://localhost:3000"
       ]
     },
     {
       "name": "g2-microphone",
-      "desc": "Captures speech from the G2 microphone via bridge.audioControl for live translation (Phase 2 default)."
-    },
-    {
-      "name": "phone-microphone",
-      "desc": "Captures speech from the phone microphone for live translation. Retained for the deprecated WebRTC rollback path; remove after the §6 rollback gate (Discord #7 + real-device validation)."
+      "desc": "Captures speech from the G2 microphone via bridge.audioControl for live translation."
     }
   ],
   "supported_languages": ["en", "ja", "es", "fr", "ko"]
