@@ -62,6 +62,8 @@ function defaultCfg(over: Partial<AppConfig> = {}): AppConfig {
     modelName: 'gpt-realtime-translate',
     useMockBridge: true,
     dev: false,
+    realtimeWsUrl: '/api/realtime/ws',
+    transport: 'ws',
     ...over,
   }
 }
