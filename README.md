@@ -58,9 +58,8 @@ cp .env.example .env  # 必要な値を埋める
 | `ALLOWED_ORIGINS` | CORS allowlist (カンマ区切り) |
 | `OPENAI_API_KEY` | OpenAI API key (backend のみで使用、WebView に渡さない) |
 | `SAFETY_ID_SALT` | `OpenAI-Safety-Identifier` を生成するための salt |
-| `PUBLIC_BACKEND_URL` | WebView から backend に到達する URL (vite `PUBLIC_*` envs) |
 | `PUBLIC_REALTIME_WS_URL` | Phase 2 backend WS relay path (default `/api/realtime/ws`、Vite proxy で同一 origin) |
-| `PUBLIC_TRANSPORT` | Phase 2 transport selector (`ws` default \| `webrtc` rollback、deprecated) |
+| `PUBLIC_USE_MOCK_BRIDGE` | `"true"` で Even Hub SDK ハンドシェイクをスキップしてモックを使う (`pnpm dev` をブラウザ単体で動かすとき用) |
 
 ## Milestones
 
@@ -76,7 +75,7 @@ cp .env.example .env  # 必要な値を埋める
 
 ## 現在の実装状況
 
-**M0–M2 完了、Phase 2 (audio source 切替 + WS transport) 実装中**。Phase 1 (`getUserMedia` + WebRTC) は実機 WKWebView で `NotAllowedError` になることが 2026-05-11 に判明 (Issue #7) し、**Phase 2 (`bridge.audioControl` + WS proxy) へ前倒し移行**中。詳細は [`docs/phase2-migration-plan.md`](./docs/phase2-migration-plan.md)。
+**Phase 2 移行完了 (2026-05-13)**。Phase 1 (`getUserMedia` + WebRTC) は実機 iOS WKWebView で恒久的に動作不能 (Issue #7、Discord 一次情報) と確定し、`bridge.audioControl(true)` + バックエンド WebSocket relay に切り替え済。実機検証も §6 rollback gate を通過し、レガシー WebRTC コード一式は T7b で物理削除済。詳細は [`docs/phase2-migration-plan.md`](./docs/phase2-migration-plan.md)、§6 rollback gate プレイブックは [`docs/real-device-validation.md`](./docs/real-device-validation.md)。
 
 ### 達成範囲 (2026-05-13 時点)
 
@@ -94,25 +93,23 @@ cp .env.example .env  # 必要な値を埋める
 
 **Total: 430 tests (shared 78 / backend 38 / app 314)**, all green. (Phase 2 完了後、legacy WebRTC 経路 + 関連テストを T7b で削除済。)
 
-### Phase 2 進捗 (PR トラッキング: Issue #6)
+### Phase 2 PR 履歴 (closed: Issue #6 / #7)
 
-- ✅ PR #8〜#13 — Phase 2 実装 + 実機検証ガイド + App.ts refactor (T0〜T7a)
-- ✅ T7b — **物理削除完了** (本 PR): phoneMic / webrtcTranslationClient / sdp / audioPlayer / apiClient / openai.ts / 設計書 §6.3/§9.1/§14.1/§15.2 inline rewrite / app.json `phone-microphone` permission 削除
-
-#### 過去メモ
-- ✅ PR #8 — Plan T0.1 spike findings (`session.*` prefix 必須、frame size、6 s grace period)
-- ✅ PR #9 — shared: PCM helpers (T1.1) + WS protocol types (T1.2)
-- ✅ PR #10 — backend WS relay (T2)
-- ✅ PR #11 — frontend bridgeMic + WS client (T0.2 + T3 + T4)
-- 🚧 PR-5 (this PR) — TranslationRuntime abstraction + Vite ws:true + config envs + `@deprecated` markers (T5.1 / T5.3 / T5.4 / T5.5 / T7a partial)
-- ⏳ PR-5b — AppDeps refactor + app.test.ts rewrite + createWebRtcRuntime legacy adapter (T5.2 / T5.6)
-- ⏳ T7b — 物理削除 (`phoneMic.ts` / `webrtcTranslationClient.ts` / `sdp.ts`)。§6 rollback gate (Discord #7 + 実機 1 ラウンド成功) 後
+| PR | 内容 | step |
+|---|---|---|
+| #8 | Plan T0.1 spike findings (`session.*` prefix 必須、frame size、6 s grace period) | docs |
+| #9 | shared: PCM helpers + WS protocol types | T1.1 + T1.2 |
+| #10 | backend WS relay | T2 |
+| #11 | frontend bridgeMic + WS client | T0.2 + T3 + T4 |
+| #12 | TranslationRuntime abstraction + Vite ws:true + config envs + `@deprecated` markers | T5 partial + T7a partial |
+| #13 | AppDeps refactor + app.test.ts rewrite + real-device validation guide | T5.2 + T5.6 + T7a |
+| #14 | 物理削除 (`phoneMic` / `webrtcTranslationClient` / `sdp` / `audioPlayer` / `apiClient` / `openai.ts` / `phone-microphone` permission / 設計書 §6.3 / §9.1 / §14.1 / §15.2 inline rewrite) | **T7b** |
 
 ### 未達範囲（要ユーザー実施）
 
-- **実機 PoC** — G2 装着時の WS 経路動作確認、字幕表示・遅延計測、`.ehpk` private build
-- **翻訳品質テスト** — 実 OpenAI Realtime API への発話、字幕精度・遅延の主観評価
-- **M4 Phase 2 拡張** — IMU ジェスチャ、商談支援 / Akerun 文脈拡張（設計書 §24）
+- **翻訳品質チューニング** — `gpt-realtime-translate` (preview) は中国語など一部 input 言語の transcribe が不安定。`docs/real-device-validation.md` §10 troubleshooting 参照。サポート言語拡大は upstream 側マター。
+- **本番 backend デプロイ** — `apps/evenhub-app/app.json` の `network.whitelist` を本番ドメインに差し替え + `.ehpk` private build
+- **M4 拡張機能** — IMU ジェスチャ、商談支援 / Akerun 文脈拡張（設計書 §24）
 
 詳細は [`docs/test-plan.md`](./docs/test-plan.md) §3 を参照。
 
@@ -126,7 +123,7 @@ cp .env.example .env  # 必要な値を埋める
 ## Even Hub packaging notes
 
 - `apps/evenhub-app/app.json` の `permissions[].whitelist` は PoC 用に `http://localhost:3000` を含む。本番 backend ドメインが決まったら差し替える。
-- `permissions` には Phase 2 の `g2-microphone` と legacy `phone-microphone` を併記。後者は §6 rollback gate 後の T7b で削除予定。
+- `permissions` には `g2-microphone` を宣言。`phone-microphone` は T7b で削除済 (iOS WKWebView の `getUserMedia` 制約により Phase 1 経路は恒久的に動作不能、Issue #7)。
 - Even Hub SDK は `@evenrealities/even_hub_sdk@0.0.10` を exact pin。設計書 §9.1 の `min_sdk_version` と一致。
 - QR sideload や `evenhub pack` の手順は `docs/realtime-translation-eveng2-mvp-design.md` §22 を参照。
 

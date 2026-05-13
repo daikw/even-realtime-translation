@@ -49,9 +49,9 @@ PoC の狙いは以下の 3 点。
 * base64 PCM16 over WebSocket (frontend ↔ backend ↔ OpenAI)
 * WebSocket reconnect / grace-period (T0.1 spike findings §10.3)
 
-> 旧 "Phase 1: phone mic + OpenAI WebRTC" の記述は本ドキュメントの §5.1 /
-> §6.3 / §9.1 / §14.1 / §15.2 に残っているが、**現在は無効** (deprecated)。
-> 物理削除は §6 rollback gate (実機 1 ラウンド成功) 通過後の T7b で行う。
+> 旧 "Phase 1: phone mic + OpenAI WebRTC" の構成図は本ドキュメントの §5.1
+> に **歴史的記録として残してある**。コードベース・他セクションの記述は
+> Phase 2 後の状態に書き換え済 (T7b)。
 
 ⸻
 
@@ -145,13 +145,14 @@ Akerun APIや社内APIと連携し、場所・扉・予定に応じたHUDを表�
 
 5. システム構成
 
-5.1 ~~Phase 1 構成~~ (deprecated)
+5.1 ~~Phase 1 構成~~ (廃止、歴史的記録)
 
 > ⚠️ この構成は 2026-05-11 の実機検証で **iOS WKWebView の policy により
 > `getUserMedia()` が `NotAllowedError` となる** ことが確定し、恒久的に
 > 動作不能であることが分かった (Issue #7、Discord 複数開発者の一次情報)。
-> 採用構成は §5.2 (現行: Phase 2) を参照。本セクションは rollback gate
-> 通過後の T7b で削除予定。
+> コードベースは T7b (2026-05-13) で WebRTC 経路を物理削除済。
+> 採用構成は §5.2 (現行: Phase 2) を参照。本セクションは「採用しなかった
+> 構成」の記録としてのみ残してある。
 
 Even G2 Glasses
   ├─ Display: translated subtitle HUD
