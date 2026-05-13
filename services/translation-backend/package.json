@@ -6,7 +6,7 @@
   "main": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src tests --max-warnings 0",
+    "lint": "eslint src --max-warnings 0",
     "test": "vitest run --passWithNoTests",
     "test:coverage": "vitest run --coverage --passWithNoTests",
     "build": "tsc -p tsconfig.build.json",

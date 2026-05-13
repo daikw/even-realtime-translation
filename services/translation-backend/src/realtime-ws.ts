@@ -26,9 +26,12 @@ import {
 import { computeSafetyIdentifier } from '@even-rt/shared/server'
 
 import { type Config } from './config.js'
-import { TRANSLATION_MODEL } from './openai.js'
 
 export const REALTIME_WS_PATH = '/api/realtime/ws'
+/** OpenAI Realtime Translation preview model. Phase 2 confirmed support
+ * for English-source translation; see docs/real-device-validation.md §10
+ * for the known input-language limitations. */
+export const TRANSLATION_MODEL = 'gpt-realtime-translate'
 export const UPSTREAM_URL = `wss://api.openai.com/v1/realtime/translations?model=${TRANSLATION_MODEL}`
 export const TRANSCRIPTION_MODEL = 'gpt-realtime-whisper'
 export const NOISE_REDUCTION_TYPE = 'near_field' as const
