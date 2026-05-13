@@ -5,6 +5,18 @@
  *  - normalizes permission/missing-device failures into a single typed error
  *    callers can branch on without parsing browser-specific `name` strings;
  *  - lets tests inject a fake `mediaDevices` without monkey-patching globals.
+ *
+ * @deprecated since 2026-05-12 — Phase 2 migration (docs/phase2-migration-plan.md §3 T7.4).
+ *
+ * The production Even Realities iOS WKWebView refuses `getUserMedia` with
+ * `NotAllowedError` (see Issue #7). The replacement is `audio/bridgeMic.ts`
+ * which acquires audio via the Even Hub bridge (`bridge.audioControl(true)`
+ * + `audioEvent.audioPcm`).
+ *
+ * This file is retained for the §6 rollback gate (Discord #7 confirmation +
+ * real-device validation of the WS path). It will be deleted in T7b after
+ * both conditions are met. Do not call `acquirePhoneMic` from new code —
+ * use the WS path via `createWebSocketRuntimeFactory` instead.
  */
 
 export class MicPermissionDeniedError extends Error {

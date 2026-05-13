@@ -2,6 +2,12 @@
  * SDP exchange against the OpenAI Realtime translations endpoint
  * (`/v1/realtime/translations/calls`, design doc §14.1).
  *
+ * @deprecated since 2026-05-12 — Phase 2 migration (docs/phase2-migration-plan.md §3 T7.3).
+ *
+ * SDP exchange is WebRTC-only. The Phase 2 WS path does not perform an SDP
+ * handshake. This file ships alongside `webrtcTranslationClient.ts` and
+ * will be deleted in T7b after the §6 rollback gate.
+ *
  * The client posts a raw SDP offer with `Content-Type: application/sdp` and a
  * `Bearer ${clientSecret}` header; the response body is the SDP answer in
  * `text/plain`. We deliberately keep this module fetch-only so it stays

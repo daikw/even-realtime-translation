@@ -295,6 +295,8 @@ OpenAI Realtime Translation WebSocket では `session.output_audio.delta` で **
 
 Step 7 は **deprecate-only**。実ファイル削除は §6 の rollback ゲート条件 (Discord 回答 + 実機 1 ラウンド成功) を満たした **後** に別 commit で行う。
 
+> **Status (2026-05-13, PR-5)**: T7.3 / T7.4 / T7.5 / T7.6 完了。T7.1 と T7.2 は banner を追加した状態で停止 — section-by-section 書き換えは PR-5b (App refactor) と同時に行う。
+
 #### Step 7a — Docs & deprecate marking (Plan merge と同時)
 
 - **T7.1**: `docs/realtime-translation-eveng2-mvp-design.md` §2, §5.1, §6.3, §9.1, §14.1, §15.2 を書き換え。

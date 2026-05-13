@@ -28,6 +28,18 @@ import { exchangeSdp } from './sdp.js'
  * forwarded to `onError` instead of escaping into the event loop and tearing
  * down the call. Callers should treat `onError` as a best-effort observability
  * hook, not a control-flow primitive.
+ *
+ * @deprecated since 2026-05-12 — Phase 2 migration (docs/phase2-migration-plan.md §3 T7.3).
+ *
+ * The WebRTC path depends on `getUserMedia`, which is blocked in the
+ * production Even Realities iOS WKWebView (Issue #7). The replacement is
+ * `realtime/websocketTranslationClient.ts` driven by
+ * `realtime/runtimeWs.ts` — same OpenAI API contract, different transport
+ * (WS proxy through the backend instead of direct WebRTC).
+ *
+ * This file is retained for the §6 rollback gate (Discord #7 confirmation +
+ * real-device validation of the WS path). It will be deleted in T7b after
+ * both conditions are met. The `realtime/sdp.ts` helper goes with it.
  */
 
 export interface WebRtcTranslationOpts {

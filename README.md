@@ -1,9 +1,10 @@
 # Even G2 Realtime Translation HUD PoC
 
 Even Realities G2 を「リアルタイム翻訳字幕 HUD」として利用する PoC。
-スマホマイクで取得した音声を OpenAI Realtime Translation API で逐次翻訳し、G2 グラスに字幕として表示する。
+**G2 マイク** で取得した音声を OpenAI Realtime Translation API で逐次翻訳し、G2 グラスに字幕として表示する。
 
 設計の詳細は [`docs/realtime-translation-eveng2-mvp-design.md`](./docs/realtime-translation-eveng2-mvp-design.md) を参照。
+Phase 2 移行（getUserMedia → bridge.audioControl + WebRTC → WebSocket）の経緯は [`docs/phase2-migration-plan.md`](./docs/phase2-migration-plan.md) を参照。
 
 ## Repository layout
 
@@ -58,6 +59,8 @@ cp .env.example .env  # 必要な値を埋める
 | `OPENAI_API_KEY` | OpenAI API key (backend のみで使用、WebView に渡さない) |
 | `SAFETY_ID_SALT` | `OpenAI-Safety-Identifier` を生成するための salt |
 | `PUBLIC_BACKEND_URL` | WebView から backend に到達する URL (vite `PUBLIC_*` envs) |
+| `PUBLIC_REALTIME_WS_URL` | Phase 2 backend WS relay path (default `/api/realtime/ws`、Vite proxy で同一 origin) |
+| `PUBLIC_TRANSPORT` | Phase 2 transport selector (`ws` default \| `webrtc` rollback、deprecated) |
 
 ## Milestones
 
@@ -73,29 +76,39 @@ cp .env.example .env  # 必要な値を埋める
 
 ## 現在の実装状況
 
-**M0 + M1 + M2 達成済み**（PR 段階）。コードベースは設計書 §1〜§17 のうち、ソフトウェア側で自動化できる
-全レイヤを実装し、390+ tests / 全パッケージ 80%+ coverage で green。
+**M0–M2 完了、Phase 2 (audio source 切替 + WS transport) 実装中**。Phase 1 (`getUserMedia` + WebRTC) は実機 WKWebView で `NotAllowedError` になることが 2026-05-11 に判明 (Issue #7) し、**Phase 2 (`bridge.audioControl` + WS proxy) へ前倒し移行**中。詳細は [`docs/phase2-migration-plan.md`](./docs/phase2-migration-plan.md)。
 
-### 達成範囲
+### 達成範囲 (2026-05-13 時点)
 
 | Layer | Module | 状態 |
 | --- | --- | --- |
-| `packages/shared` | 型 / 言語 / formatting / safety identifier | ✅ 61 tests / 96.87% statements |
-| `services/translation-backend` | Fastify + `/health` + `/api/openai/realtime/translation/session` + `/api/events` | ✅ 47 tests / 93.10% statements |
-| `apps/evenhub-app/even/` | bridge handshake / display throttle / input / lifecycle / storage | ✅ |
-| `apps/evenhub-app/realtime/` | event parser / SDP / reconnect / WebRTC orchestrator | ✅ |
+| `packages/shared` | 型 / 言語 / formatting / safety identifier / **PCM helpers + WS protocol types** | ✅ 78 tests |
+| `services/translation-backend` | Fastify + `/health` + `/api/openai/realtime/translation/session` + `/api/events` + **`/api/realtime/ws` WS relay** | ✅ 69 tests |
+| `apps/evenhub-app/even/` | bridge handshake / display throttle / input / lifecycle / storage / stateful mock | ✅ |
+| `apps/evenhub-app/realtime/` | event parser / reconnect / **WebSocket translation client** / **TranslationRuntime** + WS factory / WebRTC client + SDP (`@deprecated`) | ✅ |
+| `apps/evenhub-app/audio/` | **`bridgeMic.ts`** (G2 mic via bridge.audioControl) / `phoneMic.ts` (`@deprecated`) / audio player | ✅ |
 | `apps/evenhub-app/hud/` | subtitle buffer / layout / screens | ✅ |
 | `apps/evenhub-app/state/` | reducer / store / inputHandler | ✅ |
-| `apps/evenhub-app/audio/` | phone mic / audio player | ✅ |
-| `apps/evenhub-app/backend/` | apiClient | ✅ |
-| `apps/evenhub-app/app.ts` | App lifecycle (DI で全 I/O 注入可) | ✅ |
-| 統合テスト | state+hud / app-lifecycle / backend full-stack | ✅ 283 tests / 92.61% statements |
+| `apps/evenhub-app/app.ts` | App lifecycle (DI、現状は WebRTC 経路。T5 で TranslationRuntime に統一予定) | ⚠️ refactor pending |
+| 統合テスト | state+hud / app-lifecycle / backend full-stack | ✅ |
+
+**Total: 514 tests (shared 78 / backend 69 / app 367)**, all green.
+
+### Phase 2 進捗 (PR トラッキング: Issue #6)
+
+- ✅ PR #8 — Plan T0.1 spike findings (`session.*` prefix 必須、frame size、6 s grace period)
+- ✅ PR #9 — shared: PCM helpers (T1.1) + WS protocol types (T1.2)
+- ✅ PR #10 — backend WS relay (T2)
+- ✅ PR #11 — frontend bridgeMic + WS client (T0.2 + T3 + T4)
+- 🚧 PR-5 (this PR) — TranslationRuntime abstraction + Vite ws:true + config envs + `@deprecated` markers (T5.1 / T5.3 / T5.4 / T5.5 / T7a partial)
+- ⏳ PR-5b — AppDeps refactor + app.test.ts rewrite + createWebRtcRuntime legacy adapter (T5.2 / T5.6)
+- ⏳ T7b — 物理削除 (`phoneMic.ts` / `webrtcTranslationClient.ts` / `sdp.ts`)。§6 rollback gate (Discord #7 + 実機 1 ラウンド成功) 後
 
 ### 未達範囲（要ユーザー実施）
 
-- **M3 実機 PoC**（設計書 §16.4） — G2 装着時の表示・遅延・ちらつき計測、QR sideload、`.ehpk` private build
-- **翻訳品質テスト**（§16.5） — 実 OpenAI Realtime API への発話、字幕精度・遅延の主観評価
-- **M4 Phase 2** — G2 mic 切替、IMU ジェスチャ、商談支援 / Akerun 文脈拡張（設計書 §24）
+- **実機 PoC** — G2 装着時の WS 経路動作確認、字幕表示・遅延計測、`.ehpk` private build
+- **翻訳品質テスト** — 実 OpenAI Realtime API への発話、字幕精度・遅延の主観評価
+- **M4 Phase 2 拡張** — IMU ジェスチャ、商談支援 / Akerun 文脈拡張（設計書 §24）
 
 詳細は [`docs/test-plan.md`](./docs/test-plan.md) §3 を参照。
 
@@ -109,6 +122,7 @@ cp .env.example .env  # 必要な値を埋める
 ## Even Hub packaging notes
 
 - `apps/evenhub-app/app.json` の `permissions[].whitelist` は PoC 用に `http://localhost:3000` を含む。本番 backend ドメインが決まったら差し替える。
+- `permissions` には Phase 2 の `g2-microphone` と legacy `phone-microphone` を併記。後者は §6 rollback gate 後の T7b で削除予定。
 - Even Hub SDK は `@evenrealities/even_hub_sdk@0.0.10` を exact pin。設計書 §9.1 の `min_sdk_version` と一致。
 - QR sideload や `evenhub pack` の手順は `docs/realtime-translation-eveng2-mvp-design.md` §22 を参照。
 
