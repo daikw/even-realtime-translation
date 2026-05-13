@@ -87,13 +87,9 @@ function makeFakeRuntimeFactory(): FakeRuntimeFactoryHandle {
 
 function defaultCfg(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    backendUrl: 'http://localhost:3000',
-    openaiBaseUrl: 'https://api.openai.com',
-    modelName: 'gpt-realtime-translate',
     useMockBridge: true,
     dev: false,
     realtimeWsUrl: '/api/realtime/ws',
-    transport: 'ws',
     ...over,
   }
 }

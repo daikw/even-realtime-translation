@@ -82,20 +82,24 @@ cp .env.example .env  # 必要な値を埋める
 
 | Layer | Module | 状態 |
 | --- | --- | --- |
-| `packages/shared` | 型 / 言語 / formatting / safety identifier / **PCM helpers + WS protocol types** | ✅ 78 tests |
-| `services/translation-backend` | Fastify + `/health` + `/api/openai/realtime/translation/session` + `/api/events` + **`/api/realtime/ws` WS relay** | ✅ 69 tests |
+| `packages/shared` | 型 / 言語 / formatting / safety identifier / PCM helpers + WS protocol types | ✅ 78 tests |
+| `services/translation-backend` | Fastify + `/health` + `/api/events` + **`/api/realtime/ws` WS relay** | ✅ 38 tests |
 | `apps/evenhub-app/even/` | bridge handshake / display throttle / input / lifecycle / storage / stateful mock | ✅ |
-| `apps/evenhub-app/realtime/` | event parser / reconnect / **WebSocket translation client** / **TranslationRuntime** + WS factory / WebRTC client + SDP (`@deprecated`) | ✅ |
-| `apps/evenhub-app/audio/` | **`bridgeMic.ts`** (G2 mic via bridge.audioControl) / `phoneMic.ts` (`@deprecated`) / audio player | ✅ |
+| `apps/evenhub-app/realtime/` | event parser / reconnect / **WebSocket translation client** / **TranslationRuntime** + WS factory | ✅ |
+| `apps/evenhub-app/audio/` | **`bridgeMic.ts`** (G2 mic via bridge.audioControl) | ✅ |
 | `apps/evenhub-app/hud/` | subtitle buffer / layout / screens | ✅ |
 | `apps/evenhub-app/state/` | reducer / store / inputHandler | ✅ |
-| `apps/evenhub-app/app.ts` | App lifecycle (DI、現状は WebRTC 経路。T5 で TranslationRuntime に統一予定) | ⚠️ refactor pending |
-| 統合テスト | state+hud / app-lifecycle / backend full-stack | ✅ |
+| `apps/evenhub-app/app.ts` | App lifecycle (DI、TranslationRuntime 経由) | ✅ |
+| 統合テスト | state+hud / app-lifecycle | ✅ |
 
-**Total: 514 tests (shared 78 / backend 69 / app 367)**, all green.
+**Total: 430 tests (shared 78 / backend 38 / app 314)**, all green. (Phase 2 完了後、legacy WebRTC 経路 + 関連テストを T7b で削除済。)
 
 ### Phase 2 進捗 (PR トラッキング: Issue #6)
 
+- ✅ PR #8〜#13 — Phase 2 実装 + 実機検証ガイド + App.ts refactor (T0〜T7a)
+- ✅ T7b — **物理削除完了** (本 PR): phoneMic / webrtcTranslationClient / sdp / audioPlayer / apiClient / openai.ts / 設計書 §6.3/§9.1/§14.1/§15.2 inline rewrite / app.json `phone-microphone` permission 削除
+
+#### 過去メモ
 - ✅ PR #8 — Plan T0.1 spike findings (`session.*` prefix 必須、frame size、6 s grace period)
 - ✅ PR #9 — shared: PCM helpers (T1.1) + WS protocol types (T1.2)
 - ✅ PR #10 — backend WS relay (T2)
