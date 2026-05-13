@@ -21,6 +21,8 @@ describe('loadAppConfig', () => {
     expect(cfg.modelName).toBe('gpt-realtime-translate')
     expect(cfg.useMockBridge).toBe(false)
     expect(cfg.dev).toBe(false)
+    expect(cfg.realtimeWsUrl).toBe('/api/realtime/ws')
+    expect(cfg.transport).toBe('ws')
   })
 
   it('reads PUBLIC_BACKEND_URL when set', () => {
@@ -129,6 +131,38 @@ describe('loadAppConfig', () => {
       // We don't strip here; the URL parser keeps it. SDP exchange already
       // strips trailing slashes itself. Just confirm the value is accepted.
       expect(cfg.openaiBaseUrl.startsWith('https://api.openai.com')).toBe(true)
+    })
+  })
+
+  describe('Phase 2 envs (T5.3)', () => {
+    it('reads PUBLIC_REALTIME_WS_URL when set', () => {
+      const cfg = loadAppConfig({
+        PUBLIC_REALTIME_WS_URL: 'wss://example.com/realtime',
+      } as unknown as ImportMetaEnv)
+      expect(cfg.realtimeWsUrl).toBe('wss://example.com/realtime')
+    })
+
+    it('falls back to /api/realtime/ws when PUBLIC_REALTIME_WS_URL is empty', () => {
+      const cfg = loadAppConfig({
+        PUBLIC_REALTIME_WS_URL: '',
+      } as unknown as ImportMetaEnv)
+      expect(cfg.realtimeWsUrl).toBe('/api/realtime/ws')
+    })
+
+    it('reads PUBLIC_TRANSPORT="webrtc" for the rollback path', () => {
+      const cfg = loadAppConfig({
+        PUBLIC_TRANSPORT: 'webrtc',
+      } as unknown as ImportMetaEnv)
+      expect(cfg.transport).toBe('webrtc')
+    })
+
+    it('defaults to ws for any other PUBLIC_TRANSPORT value (typo / unknown)', () => {
+      for (const v of ['', 'WS', 'http', 'grpc', 'undefined']) {
+        const cfg = loadAppConfig({
+          PUBLIC_TRANSPORT: v,
+        } as unknown as ImportMetaEnv)
+        expect(cfg.transport).toBe('ws')
+      }
     })
   })
 })

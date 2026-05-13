@@ -1,4 +1,23 @@
-Even G2 Realtime Translation HUD PoC 設計書
+Even G2 Realtime Translation HUD 設計書
+
+---
+
+⚠️ **Phase 2 migration in progress (2026-05-13).**
+
+実機検証 (2026-05-11) で **Phase 1 (`getUserMedia` + WebRTC) は iOS WKWebView の policy で blocker** になることが確定し、`bridge.audioControl(true)` + バックエンド WS proxy 経路への移行を進めている (Issue #6 / #7)。
+
+本ドキュメントの以下のセクションは現在の実装と乖離している。整合が取れるまでは [`docs/phase2-migration-plan.md`](./phase2-migration-plan.md) を **single source of truth** として参照してほしい:
+
+- §2.x — PoC 結論 (transport を WebRTC と書いている部分)
+- §5.1 — Phase 1 audio capture (`navigator.mediaDevices.getUserMedia` 前提)
+- §6.3 — Realtime transport (WebRTC SDP exchange 前提)
+- §9.1 — `app.json` permission (`phone-microphone` のみ列挙)
+- §14.1 — クライアント↔OpenAI の直接接続
+- §15.2 — start sequence のステップ
+
+セクションごとの書き換えは T7b (`§6 rollback gate` 通過後) で実施する。それまでは本ドキュメントの該当箇所を読むときは plan §3 を併読してほしい。
+
+---
 
 1. 概要
 

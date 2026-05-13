@@ -10,27 +10,42 @@
  *  - **Mock bridge flag** (`PUBLIC_USE_MOCK_BRIDGE`) — when set to `"true"`,
  *    `boot()` skips the Even Hub SDK handshake and uses an in-memory mock so
  *    `pnpm dev` works in a normal browser without the Even host wrapper.
+ *  - **Realtime WS URL** (`PUBLIC_REALTIME_WS_URL`) — Phase 2 backend WS
+ *    relay path. Default `/api/realtime/ws` resolves same-origin via the
+ *    Vite proxy (see docs/phase2-migration-plan.md §3 T5.3).
+ *  - **Transport** (`PUBLIC_TRANSPORT`) — Phase 2 transport selector
+ *    (`'ws'` | `'webrtc'`). Default `'ws'`. Set to `'webrtc'` to roll back
+ *    to the legacy `getUserMedia` + `RTCPeerConnection` path while it still
+ *    exists (deprecated, see §6).
  *
  * Only `PUBLIC_*` env vars are exposed to the client by `vite.config.ts`'s
  * `envPrefix`, so we don't accidentally leak server-side secrets here.
  */
+export type TransportKind = 'ws' | 'webrtc'
+
 export interface AppConfig {
   backendUrl: string
   openaiBaseUrl: string
   modelName: string
   useMockBridge: boolean
   dev: boolean
+  realtimeWsUrl: string
+  transport: TransportKind
 }
 
 const DEFAULT_BACKEND_URL = 'http://localhost:3000'
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com'
 const DEFAULT_MODEL_NAME = 'gpt-realtime-translate'
+const DEFAULT_REALTIME_WS_URL = '/api/realtime/ws'
+const DEFAULT_TRANSPORT: TransportKind = 'ws'
 
 interface MaybeEnv {
   PUBLIC_BACKEND_URL?: string
   PUBLIC_OPENAI_BASE_URL?: string
   PUBLIC_MODEL_NAME?: string
   PUBLIC_USE_MOCK_BRIDGE?: string
+  PUBLIC_REALTIME_WS_URL?: string
+  PUBLIC_TRANSPORT?: string
   DEV?: boolean
 }
 
@@ -90,6 +105,14 @@ function validateOpenaiBaseUrl(raw: string, dev: boolean): string {
   return DEFAULT_OPENAI_BASE_URL
 }
 
+function readTransport(value: unknown): TransportKind {
+  if (value === 'webrtc') return 'webrtc'
+  if (value === 'ws') return 'ws'
+  // Anything else (unset, typo) defaults to the Phase 2 path. Rolling back
+  // to WebRTC must be an explicit env opt-in.
+  return DEFAULT_TRANSPORT
+}
+
 export function loadAppConfig(env: ImportMetaEnv = import.meta.env): AppConfig {
   const e = env as unknown as MaybeEnv
   const dev = e.DEV === true
@@ -100,5 +123,7 @@ export function loadAppConfig(env: ImportMetaEnv = import.meta.env): AppConfig {
     modelName: readString(e.PUBLIC_MODEL_NAME, DEFAULT_MODEL_NAME),
     useMockBridge: e.PUBLIC_USE_MOCK_BRIDGE === 'true',
     dev,
+    realtimeWsUrl: readString(e.PUBLIC_REALTIME_WS_URL, DEFAULT_REALTIME_WS_URL),
+    transport: readTransport(e.PUBLIC_TRANSPORT),
   }
 }

@@ -34,3 +34,17 @@ export {
   type WebSocketTranslationOpts,
   type WsConnectionState,
 } from './websocketTranslationClient.js'
+
+export {
+  BackendError,
+  MicPermissionError,
+  type TargetLanguageCode,
+  type TranslationRuntime,
+  type TranslationRuntimeFactory,
+  type TranslationRuntimeStartOpts,
+} from './runtime.js'
+
+export {
+  createWebSocketRuntimeFactory,
+  type CreateWebSocketRuntimeFactoryOpts,
+} from './runtimeWs.js'

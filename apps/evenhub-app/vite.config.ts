@@ -30,6 +30,11 @@ export default defineConfig({
         // Backend runs on plain HTTP locally; the dev cert is self-signed
         // and only applies to the Vite-facing leg of the connection.
         secure: false,
+        // Phase 2 same-origin WS upgrade for `/api/realtime/ws`
+        // (docs/phase2-migration-plan.md §3 T5.4). Without `ws: true` Vite
+        // doesn't proxy the upgrade handshake and the WebView falls back to
+        // the dev-server HMR path.
+        ws: true,
       },
     },
     // When fronted by a reverse proxy (Tailscale Serve, ngrok, etc.) the

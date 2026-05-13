@@ -16,8 +16,12 @@
       ]
     },
     {
+      "name": "g2-microphone",
+      "desc": "Captures speech from the G2 microphone via bridge.audioControl for live translation (Phase 2 default)."
+    },
+    {
       "name": "phone-microphone",
-      "desc": "Captures speech from the phone microphone for live translation."
+      "desc": "Captures speech from the phone microphone for live translation. Retained for the deprecated WebRTC rollback path; remove after the §6 rollback gate (Discord #7 + real-device validation)."
     }
   ],
   "supported_languages": ["en", "ja", "es", "fr", "ko"]

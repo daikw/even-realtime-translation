@@ -1,8 +1,7 @@
 # Test Plan — Even G2 Realtime Translation HUD PoC
 
 このドキュメントは設計書 §16 / §17 の方針を、現在の実装に対する実行可能なテスト計画に落とし込んだもの。
-PoC の M0〜M2（Workspace, shared, backend, evenhub-app の Even bridge / realtime / hud / state レイヤ）が対象。
-M3（実機 PoC）と M4（Phase 2: G2 mic / native 拡張）はユーザー実施項目として明示する。
+**Phase 2 移行進行中 (2026-05-13)**: audio source を `bridge.audioControl`、transport を WS proxy に切り替え中。詳細は [`docs/phase2-migration-plan.md`](./phase2-migration-plan.md)。本ドキュメントの計測値は移行が進むにつれて更新する。
 
 ---
 
@@ -10,11 +9,12 @@ M3（実機 PoC）と M4（Phase 2: G2 mic / native 拡張）はユーザー実�
 
 各 workspace パッケージ単位で `vitest run --coverage` を実行する。
 
-| Package | Tests | Coverage (statements / branches / functions / lines) |
+| Package | Tests (2026-05-13) | Coverage (statements / branches / functions / lines) |
 | --- | ---: | --- |
-| `packages/shared` | 61 | 96.87 / 90.62 / 100 / 100 |
-| `services/translation-backend` | 43 | 93.10 / 84.87 / 100 / 94.96 |
-| `apps/evenhub-app` | 273 | 92.61 / 83.22 / 91.66 / 95.14 |
+| `packages/shared` | 78 | PCM + WS types 追加分の coverage は再計測待ち (>= 80% threshold) |
+| `services/translation-backend` | 69 | WS relay 追加分の coverage は再計測待ち (>= 80% threshold) |
+| `apps/evenhub-app` | 367 | Phase 2 新規ファイル分の coverage は再計測待ち (>= 80% threshold) |
+| **Total** | **514** | 全パッケージで 80% threshold 維持 (vitest.config 強制) |
 
 しきい値（`vitest.config.ts` で強制）: 全カテゴリ 80% 以上。
 
