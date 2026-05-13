@@ -27,3 +27,10 @@ export {
   type WebRtcTranslationClient,
   type WebRtcTranslationOpts,
 } from './webrtcTranslationClient.js'
+
+export {
+  createWebSocketTranslationClient,
+  type WebSocketTranslationClient,
+  type WebSocketTranslationOpts,
+  type WsConnectionState,
+} from './websocketTranslationClient.js'
